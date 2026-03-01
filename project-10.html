@@ -1,0 +1,1118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/png" href="images/favicon.png">
+    <title>Project 10: DISTRIBUTING CUSTOMER DATA TO REGION-SPECIFIC FILES — Apache Hadoop Masterclass</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <div class="content">
+            <div class="chat-message" data-index="5">
+<div class="px-2"><h1>PROJECT 10: DISTRIBUTING CUSTOMER DATA TO REGION-SPECIFIC FILES</h1>
+<hr>
+<h2>🔴 HYPOTHETICAL PROBLEM</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>SCENARIO:
+</span>→ You work at a nationwide retail chain with operations in 4 regions:
+    NORTH, SOUTH, EAST, WEST
+→ Every day, 80 million customer transactions arrive in a single massive file
+→ Each transaction line looks like:
+    TXN_ID | CUSTOMER_ID | REGION | PRODUCT | AMOUNT | TIMESTAMP
+→ The finance team for EACH region needs ONLY their region's data
+→ Currently, the MapReduce job (from Projects 4-9 patterns) produces
+   output files like:
+    part-r-00000 (mixed data from all regions)
+    part-r-00001 (mixed data from all regions)
+    part-r-00002 (mixed data from all regions)
+
+THE PAIN:
+→ The NORTH finance team downloads ALL output files
+→ They grep/filter for NORTH records — discarding 75% of data
+→ SOUTH team does the same — discarding 75%
+→ Every team downloads EVERYTHING, uses almost NOTHING
+→ Massive wasted bandwidth, time, and frustration
+
+WHAT WE ACTUALLY NEED:
+→ part-r-00000 → contains ONLY North region data
+→ part-r-00001 → contains ONLY South region data
+→ part-r-00002 → contains ONLY East region data
+→ part-r-00003 → contains ONLY West region data
+
+WHO DECIDES WHICH RECORD GOES TO WHICH OUTPUT FILE?
+→ THE PARTITIONER</code></pre></div>
+<hr>
+<h2>🔍 HOW TO APPROACH IT</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>STEP 1: Understand what happens BETWEEN Map and Reduce
+</span>
+In Projects 4-9, we focused on Mapper logic and Reducer logic.
+But there is a CRITICAL middle step we glossed over:
+
+  MAPPER → [???] → REDUCER
+
+That [???] is actually THREE sub-steps:
+
+  MAPPER → PARTITION → SORT → SHUFFLE → REDUCER
+
+┌──────────────────────────────────────────────────────────────────┐
+│                  FULL MapReduce DATA FLOW                        │
+│                                                                  │
+│  MAP SIDE (each mapper machine):                                 │
+│  ┌────────┐  ┌────────────┐  ┌──────────┐  ┌───────────────┐   │
+│  │ MAPPER │→ │ PARTITIONER │→ │  SORTER  │→ │ COMBINER(opt) │   │
+│  └────────┘  └────────────┘  └──────────┘  └───────────────┘   │
+│                    │                                             │
+│                    │ decides which REDUCER gets this key-value   │
+│                    ▼                                             │
+│  REDUCE SIDE:                                                    │
+│  ┌─────────┐  ┌──────────┐  ┌─────────┐  ┌────────────────┐   │
+│  │ SHUFFLE │→ │  MERGE   │→ │  SORT   │→ │    REDUCER     │   │
+│  │ (fetch) │  │          │  │         │  │ (your logic)   │    │
+│  └─────────┘  └──────────┘  └─────────┘  └────────────────┘   │
+│                                                                  │
+│  Each REDUCER writes ONE output file: part-r-NNNNN              │
+│  Reducer 0 → part-r-00000                                       │
+│  Reducer 1 → part-r-00001                                       │
+│  Reducer 2 → part-r-00002                                       │
+│  ...                                                             │
+└──────────────────────────────────────────────────────────────────┘
+
+STEP 2: Understand the DEFAULT partitioner
+
+By default, Hadoop uses HashPartitioner:
+
+    partition = (key.hashCode() &amp; Integer.MAX_VALUE) % numReducers
+
+This means:
+→ Keys are RANDOMLY distributed across reducers
+→ "NORTH" might go to reducer 0 OR reducer 2 — depends on hash
+→ Same key ALWAYS goes to same reducer (deterministic hash)
+→ But you CANNOT CONTROL which reducer gets which key
+
+STEP 3: Realize we need a CUSTOM partitioner
+
+We want:
+→ NORTH records → ALWAYS reducer 0 → part-r-00000
+→ SOUTH records → ALWAYS reducer 1 → part-r-00001
+→ EAST records  → ALWAYS reducer 2 → part-r-00002
+→ WEST records  → ALWAYS reducer 3 → part-r-00003
+
+This requires OVERRIDING the default HashPartitioner
+with our OWN logic.</code></pre></div>
+<hr>
+<h2>💡 HOW CAN WE SOLVE IT</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>SOLUTION: Write a Custom Partitioner class
+</span>
+A Partitioner has ONE method to implement:
+
+    getPartition(KEY key, VALUE value, int numReduceTasks)
+    → Returns an integer: 0 to (numReduceTasks - 1)
+    → This integer IS the reducer number
+
+┌────────────────────────────────────────────────────────────┐
+│                  PARTITIONER CONTRACT                       │
+│                                                             │
+│  INPUT:  A key-value pair emitted by the mapper             │
+│  OUTPUT: An integer (reducer index)                         │
+│                                                             │
+│  RULE 1: Return value must be &gt;= 0                          │
+│  RULE 2: Return value must be &lt; numReduceTasks              │
+│  RULE 3: Same key MUST always return same partition          │
+│          (otherwise identical keys go to different reducers  │
+│           and aggregation BREAKS)                            │
+│                                                             │
+│  DIFFERENCE FROM COMBINER (Project 9):                      │
+│  → Combiner reduces DATA VOLUME before shuffle              │
+│  → Partitioner decides DATA ROUTING to reducers             │
+│  → Combiner is OPTIONAL                                     │
+│  → Partitioner ALWAYS exists (default = HashPartitioner)    │
+└────────────────────────────────────────────────────────────┘
+
+EXECUTION ORDER on map side:
+  1. Mapper emits (key, value)
+  2. Partitioner decides: this pair goes to reducer N
+  3. Pair is written to a partition buffer for reducer N
+  4. Buffer is sorted by key
+  5. Combiner (if set, from Project 9) runs on sorted buffer
+  6. Data is spilled to disk, ready for shuffle</code></pre></div>
+<hr>
+<h2>✅ WHAT COULD BE DONE</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>APPROACH A: Region as the KEY — Custom Partitioner routes by key
+</span>→ Mapper emits: key=REGION, value=transaction_data
+→ Partitioner maps REGION string to reducer index
+→ Each reducer gets one region → one output file per region
+
+APPROACH B: Composite key — Region embedded in key
+→ Mapper emits: key=REGION_PRODUCT, value=amount
+→ Partitioner extracts REGION from composite key
+→ Same partitioner logic but key carries more info
+→ (We explore composite keys fully in Project 13)
+
+APPROACH C: Region as VALUE field — Partitioner inspects value
+→ Mapper emits: key=PRODUCT, value=REGION|AMOUNT
+→ Partitioner parses VALUE to extract region
+→ LEGAL but BAD PRACTICE — Partitioner should use KEY
+
+WE CHOOSE APPROACH A:
+→ Cleanest separation
+→ Partitioner only looks at key (standard pattern)
+→ Easy to understand as first custom partitioner</code></pre></div>
+<hr>
+<h2>✅ WHAT SHOULD DO</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>1. SET NUMBER OF REDUCERS = NUMBER OF REGIONS
+</span>   → 4 regions → 4 reducers
+   → job.setNumReduceTasks(4)
+   → Each reducer writes exactly one file
+   → File-to-region mapping is deterministic
+
+2. MAP REGION NAMES TO REDUCER INDICES EXPLICITLY
+   → NORTH → 0
+   → SOUTH → 1
+   → EAST  → 2
+   → WEST  → 3
+   → Use a HashMap or switch statement — NOT hash function
+
+3. HANDLE UNKNOWN REGIONS GRACEFULLY
+   → What if data has "CENTRAL" or typo "NROTH"?
+   → Route to a default reducer (e.g., reducer 0)
+   → Or count as error — depends on business logic
+
+4. TEST WITH KNOWN DATA FIRST
+   → Create a small file with known region distribution
+   → Verify each output file contains ONLY its region
+   → Then scale to full dataset
+
+5. DOCUMENT THE PARTITION MAPPING
+   → Downstream consumers need to know:
+     "part-r-00000 = NORTH, part-r-00001 = SOUTH..."
+   → Without this, output files are meaningless numbers</code></pre></div>
+<hr>
+<h2>🚫 WHAT SHOULD NOT DO</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>1. DO NOT use more reducers than regions
+</span>   → 4 regions but 10 reducers = 6 EMPTY output files
+   → Empty part-r-00004 through part-r-00009 created
+   → Wastes task slots, confuses consumers
+
+2. DO NOT use fewer reducers than regions
+   → 4 regions but 2 reducers = 2 regions MIXED in each file
+   → Defeats the entire purpose
+
+3. DO NOT return negative partition numbers
+   → getPartition() returning -1 crashes the job
+   → ArrayIndexOutOfBoundsException
+   → ALWAYS use Math.abs() or explicit bounds checking
+
+4. DO NOT make partition logic non-deterministic
+   → Using random(), current time, etc. in getPartition()
+   → Same key MUST always go to same reducer
+   → Otherwise: identical keys split across reducers
+   → Aggregation produces WRONG RESULTS
+
+5. DO NOT ignore the Combiner interaction
+   → Combiner (Project 9) runs AFTER partitioning on map side
+   → Combiner runs PER PARTITION BUFFER
+   → Combiner logic must still be valid within each partition
+   → No conflict here — but understand the order
+
+6. DO NOT hardcode partition count in partitioner
+   → Use the numReduceTasks parameter passed to getPartition()
+   → If someone changes job.setNumReduceTasks(), your
+     partitioner must still work correctly</code></pre></div>
+<hr>
+<h2>🔀 WHEN TO USE WHAT</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>┌──────────────────────────────────────┬─────────────────────────┐
+</span>│ SITUATION                            │ PARTITIONER CHOICE       │
+├──────────────────────────────────────┼─────────────────────────┤
+│ Even distribution across reducers    │ HashPartitioner          │
+│ (default — no special routing)       │ (built-in default)       │
+├──────────────────────────────────────┼─────────────────────────┤
+│ Route by known categories            │ Custom Partitioner       │
+│ (region, department, country)        │ (this project)           │
+├──────────────────────────────────────┼─────────────────────────┤
+│ Global total ordering of output      │ TotalOrderPartitioner    │
+│ (all keys sorted across ALL files)   │ (Project 18)             │
+├──────────────────────────────────────┼─────────────────────────┤
+│ Route by key range                   │ Custom range-based       │
+│ (A-F → R0, G-M → R1, N-Z → R2)     │ Partitioner              │
+├──────────────────────────────────────┼─────────────────────────┤
+│ Handle data skew                     │ Salted Partitioner       │
+│ (one key has 90% of data)           │ (Project 33)             │
+├──────────────────────────────────────┼─────────────────────────┤
+│ Secondary sort requirement           │ Composite key +          │
+│ (sort within groups)                │ Custom Partitioner        │
+│                                      │ (Project 19)             │
+└──────────────────────────────────────┴─────────────────────────┘
+
+DECISION RULE:
+→ If you DON'T CARE which reducer gets which key → HashPartitioner
+→ If you NEED CONTROL over key-to-reducer mapping → Custom Partitioner
+→ If output files must represent MEANINGFUL groups → Custom Partitioner</code></pre></div>
+<hr>
+<h2>🚫 WHEN NOT TO USE</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>1. WHEN DEFAULT HASHING IS SUFFICIENT
+</span>   → Most aggregation jobs (sum, count, avg) don't care
+     WHICH reducer processes WHICH keys
+   → They only need: same key → same reducer (hash guarantees this)
+   → Adding a custom partitioner adds complexity for zero benefit
+
+2. WHEN CATEGORIES ARE DYNAMIC OR UNKNOWN
+   → If regions change weekly (new regions added)
+   → Hardcoded partitioner breaks with new data
+   → Use HashPartitioner + post-processing filter instead
+
+3. WHEN CATEGORIES ARE SEVERELY IMBALANCED
+   → NORTH has 70% of transactions
+   → SOUTH has 5%
+   → Custom partitioner sends 70% to ONE reducer
+   → That reducer becomes bottleneck (data skew)
+   → (We solve this in Project 33)
+   → Better to use HashPartitioner for balanced distribution
+
+4. WHEN NUMBER OF CATEGORIES IS HUGE
+   → 10,000 product categories → 10,000 reducers?
+   → Each reducer has JVM overhead (~200MB minimum)
+   → 10,000 reducers = 2TB of overhead RAM
+   → Use MultipleOutputs (Project 20) instead</code></pre></div>
+<hr>
+<h2>⚙️ HOW IT ONLY WORKS — INTERNAL MECHANICS</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>═══════════════════════════════════════════════════════════
+</span>MECHANIC 1: THE PARTITION BUFFER SYSTEM
+═══════════════════════════════════════════════════════════
+
+When a Mapper emits a key-value pair, here is what ACTUALLY happens:
+
+Step 1: Mapper calls context.write(key, value)
+
+Step 2: MapOutputBuffer receives the pair
+        → This is a CIRCULAR BUFFER in memory
+        → Default size: 100MB (mapreduce.task.io.sort.mb)
+
+Step 3: Partitioner is called IMMEDIATELY
+        → int partition = partitioner.getPartition(key, value, numReducers)
+        → The partition number is STORED alongside the key-value pair
+        → Buffer now holds: [partition_number | key | value]
+
+Step 4: When buffer reaches 80% full (io.sort.spill.percent):
+        → SPILL occurs
+        → Data in buffer is:
+          a) Sorted by (partition, then by key within partition)
+          b) Combiner runs on each partition's sorted data (if set)
+          c) Written to a spill file on local disk
+
+        ┌─────────────── SPILL FILE LAYOUT ───────────────┐
+        │                                                   │
+        │  [Partition 0 data: key1,val | key2,val | ...]   │
+        │  [Partition 1 data: key3,val | key5,val | ...]   │
+        │  [Partition 2 data: key4,val | key7,val | ...]   │
+        │  [Partition 3 data: key6,val | key8,val | ...]   │
+        │                                                   │
+        │  + INDEX FILE pointing to each partition's offset │
+        └───────────────────────────────────────────────────┘
+
+Step 5: After mapper finishes, ALL spill files are MERGED
+        → One final sorted file per mapper
+        → Still organized by partition sections
+
+Step 6: SHUFFLE — Each reducer FETCHES its partition section
+        → Reducer 0 contacts ALL mappers, asks for "partition 0 data"
+        → Reducer 1 contacts ALL mappers, asks for "partition 1 data"
+        → This is a PULL model (reducers pull from mappers)
+
+        ┌─────────────────────────────────────────────────────┐
+        │              SHUFFLE VISUALIZATION                    │
+        │                                                       │
+        │  Mapper 1 output:  [P0|P1|P2|P3]                    │
+        │  Mapper 2 output:  [P0|P1|P2|P3]                    │
+        │  Mapper 3 output:  [P0|P1|P2|P3]                    │
+        │                                                       │
+        │  Reducer 0 pulls: M1[P0] + M2[P0] + M3[P0]          │
+        │  Reducer 1 pulls: M1[P1] + M2[P1] + M3[P1]          │
+        │  Reducer 2 pulls: M1[P2] + M2[P2] + M3[P2]          │
+        │  Reducer 3 pulls: M1[P3] + M2[P3] + M3[P3]          │
+        └─────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════
+MECHANIC 2: HashPartitioner INTERNALS
+═══════════════════════════════════════════════════════════
+
+The default HashPartitioner source code is literally 3 lines:
+
+    public int getPartition(K key, V value, int numReduceTasks) {
+        return (key.hashCode() &amp; Integer.MAX_VALUE) % numReduceTasks;
+    }
+
+WHY "&amp; Integer.MAX_VALUE"?
+→ hashCode() can return NEGATIVE numbers
+→ Negative modulo in Java gives negative results
+→ Partition index MUST be non-negative
+→ Bitwise AND with 0x7FFFFFFF strips the sign bit
+→ Example: hashCode() = -12345
+  → -12345 &amp; 0x7FFFFFFF = 2147471303
+  → 2147471303 % 4 = 3 (valid partition index)
+
+WHY THIS CAUSES RANDOM DISTRIBUTION:
+→ "NORTH".hashCode() = 75457038
+→ 75457038 % 4 = 2 → NORTH goes to reducer 2
+→ "SOUTH".hashCode() = 79482265
+→ 79482265 % 4 = 1 → SOUTH goes to reducer 1
+
+→ No guarantee about which region goes where
+→ Multiple regions CAN map to same reducer
+→ This is why we need CUSTOM partitioner for our problem
+
+═══════════════════════════════════════════════════════════
+MECHANIC 3: CUSTOM PARTITIONER LIFECYCLE
+═══════════════════════════════════════════════════════════
+
+1. Job submission: Driver sets job.setPartitionerClass(MyPartitioner.class)
+2. Hadoop serializes the Job configuration
+3. Each mapper JVM instantiates MyPartitioner via reflection
+4. For EVERY key-value pair emitted by mapper:
+   → MyPartitioner.getPartition() is called
+   → Returns integer → stored in output buffer
+5. Partitioner instance lives for entire mapper lifetime
+6. ONE partitioner instance per mapper task
+7. Partitioner is NOT called on reducer side — only mapper side</code></pre></div>
+<hr>
+<h2>⚠️ COMMON PITFALLS AND FAILURE MODES</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>PITFALL 1: "Partition index out of range"
+</span>→ ERROR: java.lang.ArrayIndexOutOfBoundsException
+→ CAUSE: getPartition() returned value &gt;= numReduceTasks
+→ EXAMPLE: You return 4 but only 4 reducers (valid: 0,1,2,3)
+→ FIX: Always validate: return Math.min(index, numReduceTasks - 1)
+
+PITFALL 2: "Output files exist but some are empty"
+→ CAUSE: No data maps to that partition
+→ EXAMPLE: No WEST region transactions today
+→ Reducer 3 runs, produces empty part-r-00003
+→ NOT AN ERROR — just empty partition
+→ But downstream scripts may fail on empty files
+
+PITFALL 3: "Job is extremely slow — one reducer takes forever"
+→ CAUSE: Data skew — one partition has 80% of records
+→ DIAGNOSIS: Check reducer progress in YARN UI
+  → 3 reducers finish in 5 minutes
+  → 1 reducer still at 20% after 30 minutes
+→ ROOT CAUSE: That region has far more data
+→ FIX OPTIONS:
+  a) Sub-partition the large region (Project 33)
+  b) Accept the imbalance if tolerable
+  c) Use Combiner (Project 9) to reduce data volume
+
+PITFALL 4: "Custom partitioner not being used"
+→ CAUSE: Forgot job.setPartitionerClass() in driver
+→ Hadoop silently uses HashPartitioner
+→ Output files are mixed — no error, just wrong results
+→ ALWAYS verify with small test data first
+
+PITFALL 5: "Number of reducers doesn't match partition logic"
+→ CAUSE: Partitioner hardcodes 4 regions
+→ But job.setNumReduceTasks(8) — 8 reducers
+→ Partitioner returns 0-3, reducers 4-7 get nothing
+→ 4 empty files wasted
+→ FIX: Partitioner should USE numReduceTasks parameter
+       OR driver should explicitly set matching count
+
+PITFALL 6: "Combiner output differs from expected"
+→ CAUSE: Combiner runs PER PARTITION SECTION in spill
+→ If you're counting unique values, combiner may
+   de-duplicate WITHIN one spill but not across spills
+→ Same pitfall as Project 9 — Combiner must be idempotent
+   and associative for aggregation operations</code></pre></div>
+<hr>
+<h2>📈 SCALABILITY CONSIDERATIONS</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>PARTITIONER AND CLUSTER SCALE:
+</span>
+┌─────────────────────────────────────────────────────────────┐
+│ FACTOR              │ IMPACT                                │
+├─────────────────────┼───────────────────────────────────────┤
+│ Number of reducers  │ Each reducer = 1 JVM container        │
+│                     │ More reducers = more parallelism       │
+│                     │ BUT: more shuffle connections          │
+│                     │ M mappers × R reducers = M×R fetches  │
+├─────────────────────┼───────────────────────────────────────┤
+│ Reducer count       │ TOO FEW: each reducer overwhelmed     │
+│ sweet spot          │ TOO MANY: overhead exceeds benefit     │
+│                     │ RULE OF THUMB:                         │
+│                     │   0.95 × numNodes × maxReducersPerNode│
+│                     │   OR based on output data size:        │
+│                     │   totalOutputSize / (256MB to 1GB)     │
+├─────────────────────┼───────────────────────────────────────┤
+│ Partition balance   │ Skewed partitions = wasted cluster     │
+│                     │ 1 slow reducer holds up ENTIRE job     │
+│                     │ Job completion = slowest reducer        │
+├─────────────────────┼───────────────────────────────────────┤
+│ Shuffle overhead    │ Custom partitioner doesn't change      │
+│                     │ shuffle VOLUME — same data transferred │
+│                     │ But BALANCED partitions mean shuffle    │
+│                     │ completes evenly across reducers        │
+└─────────────────────┴───────────────────────────────────────┘
+
+SCALING OUR REGION EXAMPLE:
+
+4 regions → 4 reducers → WORKS at any data size
+BUT:
+  → If NORTH = 60% of data, reducer 0 processes 3× more
+  → 100 node cluster: 99 nodes idle waiting for 1 reducer
+  → SOLUTION at scale: Sub-partition NORTH into NORTH_A, NORTH_B, NORTH_C
+  → 6 reducers now, NORTH split across 3 → better balance
+  → (Full skew handling in Project 33)
+
+NETWORK IMPACT:
+  → Shuffle transfers ALL mapper output to reducers over network
+  → Custom partitioner doesn't reduce transfer volume
+  → Combiner (Project 9) reduces volume BEFORE shuffle
+  → Best practice: COMBINE first, then PARTITION
+  → Execution order guarantees this: Partition → Sort → Combine → Shuffle</code></pre></div>
+<hr>
+<h2>🔍 INTERPRETABILITY CONSIDERATIONS</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>HOW TO VERIFY YOUR PARTITIONER IS WORKING:
+</span>
+1. CHECK OUTPUT FILE SIZES
+   hdfs dfs -ls /output/region_data/
+   
+   -rw-r--r--  part-r-00000    245MB  ← NORTH
+   -rw-r--r--  part-r-00001    198MB  ← SOUTH
+   -rw-r--r--  part-r-00002    312MB  ← EAST
+   -rw-r--r--  part-r-00003    156MB  ← WEST
+   
+   → If sizes match expected regional distribution → CORRECT
+   → If all same size → probably using HashPartitioner (random)
+
+2. SPOT-CHECK FILE CONTENTS
+   hdfs dfs -cat /output/region_data/part-r-00000 | head -5
+   → ALL lines should show NORTH
+   → If mixed regions appear → partitioner not working
+
+3. USE JOB COUNTERS (from Project 7)
+   → Add custom counters in partitioner:
+     context.getCounter("Partitions", "NORTH").increment(1)
+   → After job: check counter values match expected distribution
+
+4. MAPPER OUTPUT RECORDS vs REDUCER INPUT RECORDS
+   → Built-in counter: "Map output records" should equal
+     sum of all "Reduce input records" (minus combiner reduction)
+   → If mismatch → data loss during shuffle (rare but possible)
+
+5. OUTPUT FILE NAMING CONVENTION
+   → part-r-00000 = Reducer 0's output
+   → part-r-00001 = Reducer 1's output
+   → The "r" means REDUCER output
+   → "m" would mean MAP-ONLY output (Project 11)
+   → The number = reducer index = partition number</code></pre></div>
+<hr>
+<h2>💻 COMPLETE WORKING CODE</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ══════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// PROJECT 10: CUSTOM PARTITIONER — REGION-BASED DATA ROUTING</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ══════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// </span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// PREREQUISITE KNOWLEDGE:</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   → MapReduce structure (Project 4)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   → Key-Value mechanics (Project 5)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   → Writable types (Project 5)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   → Combiner concept (Project 9)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   → HDFS commands (Project 3)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ══════════════════════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// FILE: RegionPartitionJob.java</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">conf</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">Configuration</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">conf</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">Configured</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">fs</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">Path</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">io</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">IntWritable</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">io</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">LongWritable</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">io</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">Text</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">mapreduce</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">Job</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">mapreduce</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">Mapper</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">mapreduce</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">Partitioner</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">mapreduce</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">Reducer</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">mapreduce</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">lib</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">input</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">FileInputFormat</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">mapreduce</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">lib</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">output</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">FileOutputFormat</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">util</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">Tool</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">util</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">ToolRunner</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">java</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">io</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">IOException</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">java</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">util</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">HashMap</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">java</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">util</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">Map</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 0, 255);">public</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">class</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">RegionPartitionJob</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">extends</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Configured</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">implements</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Tool</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span>
+<span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ════════════════════════════════════════════════════════</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// MAPPER: Parse transaction lines → emit (region, amount)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ════════════════════════════════════════════════════════</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Input line format:</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   TXN001|CUST042|NORTH|Laptop|1299.99|2024-01-15</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   TXN002|CUST017|SOUTH|Phone|899.50|2024-01-15</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Emit: key = region (Text), value = full transaction line (Text)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// WHY region as key?</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   → Partitioner routes by KEY</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   → Region in key = partitioner can read it directly</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   → No need to parse value in partitioner (clean design)</span><span>
+</span>
+<span>    </span><span class="token" style="color: rgb(0, 0, 255);">public</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">static</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">class</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">TransactionMapper</span><span>
+</span><span>            </span><span class="token" style="color: rgb(0, 0, 255);">extends</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Mapper</span><span class="token generics" style="color: rgb(57, 58, 52);">&lt;</span><span class="token generics" style="color: rgb(43, 145, 175);">LongWritable</span><span class="token generics" style="color: rgb(57, 58, 52);">,</span><span class="token generics"> </span><span class="token generics" style="color: rgb(43, 145, 175);">Text</span><span class="token generics" style="color: rgb(57, 58, 52);">,</span><span class="token generics"> </span><span class="token generics" style="color: rgb(43, 145, 175);">Text</span><span class="token generics" style="color: rgb(57, 58, 52);">,</span><span class="token generics"> </span><span class="token generics" style="color: rgb(43, 145, 175);">Text</span><span class="token generics" style="color: rgb(57, 58, 52);">&gt;</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 0, 255);">private</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Text</span><span> regionKey </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">new</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Text</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">private</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Text</span><span> transactionValue </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">new</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Text</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Counter group for tracking parse results</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">enum</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">MapCounters</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span><span>            VALID_RECORDS</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>            INVALID_RECORDS</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span>            UNKNOWN_REGION
+<span>        </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span>
+<span>        </span><span class="token annotation" style="color: rgb(57, 58, 52);">@Override</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">protected</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">void</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">map</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">LongWritable</span><span> offset</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Text</span><span> line</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Context</span><span> context</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 0, 255);">throws</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">IOException</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">InterruptedException</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span>
+<span>            </span><span class="token" style="color: rgb(43, 145, 175);">String</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">record</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> line</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">toString</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">trim</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>            </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Skip empty lines or headers</span><span>
+</span><span>            </span><span class="token" style="color: rgb(0, 0, 255);">if</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(0, 0, 255);">record</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">isEmpty</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">||</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">record</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">startsWith</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"TXN_ID"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 0, 255);">return</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span>
+<span>            </span><span class="token" style="color: rgb(43, 145, 175);">String</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span> fields </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">record</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">split</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"\\|"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>            </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Validate: expect 6 fields</span><span>
+</span><span>            </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// TXN_ID | CUSTOMER_ID | REGION | PRODUCT | AMOUNT | TIMESTAMP</span><span>
+</span><span>            </span><span class="token" style="color: rgb(0, 0, 255);">if</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>fields</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>length </span><span class="token" style="color: rgb(57, 58, 52);">!=</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">6</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span><span>                context</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">getCounter</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">MapCounters</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>INVALID_RECORDS</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">increment</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 0, 255);">return</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span>
+<span>            </span><span class="token" style="color: rgb(43, 145, 175);">String</span><span> region </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> fields</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(54, 172, 170);">2</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">trim</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">toUpperCase</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>            </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Validate region is one of expected values</span><span>
+</span><span>            </span><span class="token" style="color: rgb(0, 0, 255);">if</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">!</span><span>region</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">equals</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"NORTH"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">&amp;&amp;</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">!</span><span>region</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">equals</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"SOUTH"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">&amp;&amp;</span><span>
+</span><span>                </span><span class="token" style="color: rgb(57, 58, 52);">!</span><span>region</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">equals</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"EAST"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">&amp;&amp;</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">!</span><span>region</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">equals</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"WEST"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span><span>                context</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">getCounter</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">MapCounters</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>UNKNOWN_REGION</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">increment</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Still emit — partitioner will route to default</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// This way we don't lose data silently</span><span>
+</span><span>            </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span>
+<span>            regionKey</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">set</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>region</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            transactionValue</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">set</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(0, 0, 255);">record</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>            context</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">write</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>regionKey</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> transactionValue</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            context</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">getCounter</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">MapCounters</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>VALID_RECORDS</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">increment</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span>
+
+<span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ════════════════════════════════════════════════════════</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// CUSTOM PARTITIONER: Route regions to specific reducers</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ════════════════════════════════════════════════════════</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// THIS IS THE CORE OF PROJECT 10</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Contract:</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   → Input: key (Text = region), value, numReduceTasks</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   → Output: integer 0 to (numReduceTasks - 1)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Our mapping:</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   NORTH → 0</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   SOUTH → 1</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   EAST  → 2</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   WEST  → 3</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   Unknown → 0 (fallback — don't crash, route safely)</span><span>
+</span>
+<span>    </span><span class="token" style="color: rgb(0, 0, 255);">public</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">static</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">class</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">RegionPartitioner</span><span>
+</span><span>            </span><span class="token" style="color: rgb(0, 0, 255);">extends</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Partitioner</span><span class="token generics" style="color: rgb(57, 58, 52);">&lt;</span><span class="token generics" style="color: rgb(43, 145, 175);">Text</span><span class="token generics" style="color: rgb(57, 58, 52);">,</span><span class="token generics"> </span><span class="token generics" style="color: rgb(43, 145, 175);">Text</span><span class="token generics" style="color: rgb(57, 58, 52);">&gt;</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Static mapping — initialized once, used for all calls</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">private</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">static</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">final</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Map</span><span class="token generics" style="color: rgb(57, 58, 52);">&lt;</span><span class="token generics" style="color: rgb(43, 145, 175);">String</span><span class="token generics" style="color: rgb(57, 58, 52);">,</span><span class="token generics"> </span><span class="token generics" style="color: rgb(43, 145, 175);">Integer</span><span class="token generics" style="color: rgb(57, 58, 52);">&gt;</span><span> REGION_MAP </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">new</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">HashMap</span><span class="token generics" style="color: rgb(57, 58, 52);">&lt;</span><span class="token generics" style="color: rgb(57, 58, 52);">&gt;</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 0, 255);">static</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span><span>            REGION_MAP</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">put</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"NORTH"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">0</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            REGION_MAP</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">put</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"SOUTH"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            REGION_MAP</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">put</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"EAST"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>  </span><span class="token" style="color: rgb(54, 172, 170);">2</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            REGION_MAP</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">put</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"WEST"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>  </span><span class="token" style="color: rgb(54, 172, 170);">3</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span>
+<span>        </span><span class="token annotation" style="color: rgb(57, 58, 52);">@Override</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">public</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">int</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">getPartition</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">Text</span><span> key</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Text</span><span> value</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">int</span><span> numReduceTasks</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span><span>            </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ── CRITICAL: Extract region from key ──</span><span>
+</span><span>            </span><span class="token" style="color: rgb(43, 145, 175);">String</span><span> region </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> key</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">toString</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">toUpperCase</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">trim</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>            </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Look up the partition index</span><span>
+</span><span>            </span><span class="token" style="color: rgb(43, 145, 175);">Integer</span><span> partitionIndex </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> REGION_MAP</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">get</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>region</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>            </span><span class="token" style="color: rgb(0, 0, 255);">if</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>partitionIndex </span><span class="token" style="color: rgb(57, 58, 52);">!=</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">null</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Known region → route to designated reducer</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// WHY we check against numReduceTasks:</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// If someone runs with fewer reducers than our mapping expects,</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// we must not return an index &gt;= numReduceTasks</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 0, 255);">return</span><span> partitionIndex </span><span class="token" style="color: rgb(57, 58, 52);">%</span><span> numReduceTasks</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">else</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Unknown region → route to reducer 0 (safe fallback)</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ALTERNATIVE: Could use HashPartitioner logic here:</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   return (key.hashCode() &amp; Integer.MAX_VALUE) % numReduceTasks;</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// But explicit routing is more predictable</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 0, 255);">return</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">0</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span>
+
+<span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ════════════════════════════════════════════════════════</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// REDUCER: Collect all transactions for this partition</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ════════════════════════════════════════════════════════</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Since partitioner guarantees each reducer gets ONE region,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// the reducer simply writes all records.</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// In a real scenario, you might also:</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   → Calculate regional totals (sum amounts)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   → Count transactions per product within region</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   → We keep it simple to focus on PARTITIONING concept</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// We also calculate regional summary stats to demonstrate</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// that reducer sees ONLY its region's data.</span><span>
+</span>
+<span>    </span><span class="token" style="color: rgb(0, 0, 255);">public</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">static</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">class</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">RegionReducer</span><span>
+</span><span>            </span><span class="token" style="color: rgb(0, 0, 255);">extends</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Reducer</span><span class="token generics" style="color: rgb(57, 58, 52);">&lt;</span><span class="token generics" style="color: rgb(43, 145, 175);">Text</span><span class="token generics" style="color: rgb(57, 58, 52);">,</span><span class="token generics"> </span><span class="token generics" style="color: rgb(43, 145, 175);">Text</span><span class="token generics" style="color: rgb(57, 58, 52);">,</span><span class="token generics"> </span><span class="token generics" style="color: rgb(43, 145, 175);">Text</span><span class="token generics" style="color: rgb(57, 58, 52);">,</span><span class="token generics"> </span><span class="token generics" style="color: rgb(43, 145, 175);">Text</span><span class="token generics" style="color: rgb(57, 58, 52);">&gt;</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 0, 255);">enum</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">ReduceCounters</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span><span>            NORTH_RECORDS</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>            SOUTH_RECORDS</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>            EAST_RECORDS</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>            WEST_RECORDS</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span>            TOTAL_AMOUNT_CENTS
+<span>        </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span>
+<span>        </span><span class="token annotation" style="color: rgb(57, 58, 52);">@Override</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">protected</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">void</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">reduce</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">Text</span><span> region</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Iterable</span><span class="token generics" style="color: rgb(57, 58, 52);">&lt;</span><span class="token generics" style="color: rgb(43, 145, 175);">Text</span><span class="token generics" style="color: rgb(57, 58, 52);">&gt;</span><span> transactions</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>                              </span><span class="token" style="color: rgb(43, 145, 175);">Context</span><span> context</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 0, 255);">throws</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">IOException</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">InterruptedException</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span>
+<span>            </span><span class="token" style="color: rgb(0, 0, 255);">long</span><span> recordCount </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">0</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            </span><span class="token" style="color: rgb(0, 0, 255);">double</span><span> totalAmount </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">0.0</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>            </span><span class="token" style="color: rgb(0, 0, 255);">for</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">Text</span><span> transaction </span><span class="token" style="color: rgb(57, 58, 52);">:</span><span> transactions</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span><span>                </span><span class="token" style="color: rgb(43, 145, 175);">String</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">record</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> transaction</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">toString</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>                </span><span class="token" style="color: rgb(43, 145, 175);">String</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span> fields </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">record</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">split</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"\\|"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>                </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Write each transaction to output</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Output format: REGION \t full_record</span><span>
+</span><span>                context</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">write</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>region</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> transaction</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>                </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Track statistics</span><span>
+</span><span>                recordCount</span><span class="token" style="color: rgb(57, 58, 52);">++</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 0, 255);">if</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>fields</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>length </span><span class="token" style="color: rgb(57, 58, 52);">&gt;=</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">5</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span><span>                    </span><span class="token" style="color: rgb(0, 0, 255);">try</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span><span>                        totalAmount </span><span class="token" style="color: rgb(57, 58, 52);">+=</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Double</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">parseDouble</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>fields</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(54, 172, 170);">4</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">trim</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>                    </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">catch</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">NumberFormatException</span><span> e</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span><span>                        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Skip bad amounts — don't crash the job</span><span>
+</span><span>                    </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span><span>                </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span><span>            </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span>
+<span>            </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Increment region-specific counters</span><span>
+</span><span>            </span><span class="token" style="color: rgb(43, 145, 175);">String</span><span> regionName </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> region</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">toString</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">toUpperCase</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            </span><span class="token" style="color: rgb(0, 0, 255);">switch</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>regionName</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 0, 255);">case</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"NORTH"</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>                    context</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">getCounter</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">ReduceCounters</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>NORTH_RECORDS</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>                           </span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">increment</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>recordCount</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>                    </span><span class="token" style="color: rgb(0, 0, 255);">break</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 0, 255);">case</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"SOUTH"</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>                    context</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">getCounter</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">ReduceCounters</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>SOUTH_RECORDS</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>                           </span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">increment</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>recordCount</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>                    </span><span class="token" style="color: rgb(0, 0, 255);">break</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 0, 255);">case</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"EAST"</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>                    context</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">getCounter</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">ReduceCounters</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>EAST_RECORDS</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>                           </span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">increment</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>recordCount</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>                    </span><span class="token" style="color: rgb(0, 0, 255);">break</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 0, 255);">case</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"WEST"</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>                    context</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">getCounter</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">ReduceCounters</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>WEST_RECORDS</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>                           </span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">increment</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>recordCount</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>                    </span><span class="token" style="color: rgb(0, 0, 255);">break</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span>
+
+<span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ════════════════════════════════════════════════════════</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// DRIVER: Wire everything together</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ════════════════════════════════════════════════════════</span><span>
+</span>
+<span>    </span><span class="token annotation" style="color: rgb(57, 58, 52);">@Override</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">public</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">int</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">run</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">String</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span> args</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">throws</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Exception</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 0, 255);">if</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>args</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>length </span><span class="token" style="color: rgb(57, 58, 52);">!=</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">2</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span><span>            </span><span class="token" style="color: rgb(43, 145, 175);">System</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>err</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">println</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"Usage: RegionPartitionJob &lt;input_path&gt; &lt;output_path&gt;"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            </span><span class="token" style="color: rgb(43, 145, 175);">System</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>err</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">println</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"  input_path:  HDFS path to transaction files"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            </span><span class="token" style="color: rgb(43, 145, 175);">System</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>err</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">println</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"  output_path: HDFS path for region-partitioned output"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            </span><span class="token" style="color: rgb(0, 0, 255);">return</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(43, 145, 175);">Configuration</span><span> conf </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">getConf</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(43, 145, 175);">Job</span><span> job </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">getInstance</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>conf</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"Region Partitioned Transaction Analysis"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>        job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">setJarByClass</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">RegionPartitionJob</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(0, 0, 255);">class</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ── Set Mapper ──</span><span>
+</span><span>        job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">setMapperClass</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">TransactionMapper</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(0, 0, 255);">class</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ── Set CUSTOM Partitioner — THE KEY LINE ──</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Without this line: HashPartitioner used → regions mixed</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// With this line: Our logic routes each region to specific reducer</span><span>
+</span><span>        job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">setPartitionerClass</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">RegionPartitioner</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(0, 0, 255);">class</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ── Set Reducer ──</span><span>
+</span><span>        job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">setReducerClass</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">RegionReducer</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(0, 0, 255);">class</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ── CRITICAL: Number of reducers MUST match partition count ──</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Our partitioner maps to indices 0,1,2,3</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// So we need EXACTLY 4 reducers</span><span>
+</span><span>        job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">setNumReduceTasks</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(54, 172, 170);">4</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ── Set output key-value types ──</span><span>
+</span><span>        job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">setMapOutputKeyClass</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">Text</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(0, 0, 255);">class</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>        job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">setMapOutputValueClass</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">Text</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(0, 0, 255);">class</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>        job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">setOutputKeyClass</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">Text</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(0, 0, 255);">class</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>        job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">setOutputValueClass</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">Text</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(0, 0, 255);">class</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ── Set input/output paths ──</span><span>
+</span><span>        </span><span class="token" style="color: rgb(43, 145, 175);">FileInputFormat</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">addInputPath</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>job</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">new</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Path</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>args</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(54, 172, 170);">0</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(43, 145, 175);">FileOutputFormat</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">setOutputPath</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>job</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">new</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Path</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>args</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ── Run and report ──</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">boolean</span><span> success </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">waitForCompletion</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(54, 172, 170);">true</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Print partition summary from counters</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">if</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>success</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span><span>            </span><span class="token" style="color: rgb(43, 145, 175);">System</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>out</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">println</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"\n═══ REGION PARTITION SUMMARY ═══"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            </span><span class="token" style="color: rgb(43, 145, 175);">System</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>out</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">println</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"NORTH records (part-r-00000): "</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">+</span><span>
+</span><span>                job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">getCounters</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>                   </span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">findCounter</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">RegionReducer</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">ReduceCounters</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>NORTH_RECORDS</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>                   </span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">getValue</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            </span><span class="token" style="color: rgb(43, 145, 175);">System</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>out</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">println</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"SOUTH records (part-r-00001): "</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">+</span><span>
+</span><span>                job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">getCounters</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>                   </span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">findCounter</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">RegionReducer</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">ReduceCounters</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>SOUTH_RECORDS</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>                   </span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">getValue</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            </span><span class="token" style="color: rgb(43, 145, 175);">System</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>out</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">println</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"EAST records  (part-r-00002): "</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">+</span><span>
+</span><span>                job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">getCounters</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>                   </span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">findCounter</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">RegionReducer</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">ReduceCounters</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>EAST_RECORDS</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>                   </span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">getValue</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            </span><span class="token" style="color: rgb(43, 145, 175);">System</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>out</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">println</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"WEST records  (part-r-00003): "</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">+</span><span>
+</span><span>                job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">getCounters</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>                   </span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">findCounter</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">RegionReducer</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">ReduceCounters</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>WEST_RECORDS</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>                   </span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">getValue</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            </span><span class="token" style="color: rgb(43, 145, 175);">System</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>out</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">println</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"════════════════════════════════\n"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 0, 255);">return</span><span> success </span><span class="token" style="color: rgb(57, 58, 52);">?</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">0</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">:</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span>
+<span>    </span><span class="token" style="color: rgb(0, 0, 255);">public</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">static</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">void</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">main</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">String</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span> args</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">throws</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Exception</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">int</span><span> exitCode </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">ToolRunner</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">run</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(0, 0, 255);">new</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Configuration</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>                                      </span><span class="token" style="color: rgb(0, 0, 255);">new</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">RegionPartitionJob</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> args</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(43, 145, 175);">System</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">exit</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>exitCode</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">}</span></code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># GENERATE TEST DATA AND RUN THE JOB</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── Step 1: Generate sample transaction data ──</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">cat</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span> /tmp/transactions.txt </span><span class="token" style="color: rgb(57, 58, 52);">&lt;&lt;</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'EOF'
+</span><span class="token" style="color: rgb(163, 21, 21);">TXN001|CUST042|NORTH|Laptop|1299.99|2024-01-15
+</span><span class="token" style="color: rgb(163, 21, 21);">TXN002|CUST017|SOUTH|Phone|899.50|2024-01-15
+</span><span class="token" style="color: rgb(163, 21, 21);">TXN003|CUST091|EAST|Tablet|549.00|2024-01-15
+</span><span class="token" style="color: rgb(163, 21, 21);">TXN004|CUST023|WEST|Watch|299.99|2024-01-15
+</span><span class="token" style="color: rgb(163, 21, 21);">TXN005|CUST042|NORTH|Mouse|29.99|2024-01-15
+</span><span class="token" style="color: rgb(163, 21, 21);">TXN006|CUST055|NORTH|Keyboard|79.99|2024-01-15
+</span><span class="token" style="color: rgb(163, 21, 21);">TXN007|CUST017|SOUTH|Case|39.99|2024-01-15
+</span><span class="token" style="color: rgb(163, 21, 21);">TXN008|CUST063|EAST|Monitor|449.99|2024-01-16
+</span><span class="token" style="color: rgb(163, 21, 21);">TXN009|CUST071|EAST|Cable|12.99|2024-01-16
+</span><span class="token" style="color: rgb(163, 21, 21);">TXN010|CUST023|WEST|Charger|24.99|2024-01-16
+</span><span class="token" style="color: rgb(163, 21, 21);">TXN011|CUST088|NORTH|Laptop|1399.99|2024-01-16
+</span><span class="token" style="color: rgb(163, 21, 21);">TXN012|CUST099|SOUTH|Headphones|199.99|2024-01-16
+</span><span class="token" style="color: rgb(163, 21, 21);">TXN013|CUST101|WEST|Speaker|149.99|2024-01-16
+</span><span class="token" style="color: rgb(163, 21, 21);">TXN014|CUST042|NORTH|SSD|189.99|2024-01-16
+</span><span class="token" style="color: rgb(163, 21, 21);">TXN015|CUST110|EAST|RAM|94.99|2024-01-16
+</span><span class="token" style="color: rgb(163, 21, 21);">TXN016|CUST120|SOUTH|GPU|599.99|2024-01-17
+</span><span class="token" style="color: rgb(163, 21, 21);">TXN017|CUST130|NORTH|CPU|349.99|2024-01-17
+</span><span class="token" style="color: rgb(163, 21, 21);">TXN018|CUST140|WEST|Fan|19.99|2024-01-17
+</span><span class="token" style="color: rgb(163, 21, 21);">TXN019|CUST150|EAST|PSU|129.99|2024-01-17
+</span><span class="token" style="color: rgb(163, 21, 21);">TXN020|CUST160|SOUTH|Motherboard|249.99|2024-01-17
+</span><span class="token" style="color: rgb(163, 21, 21);">EOF</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── Step 2: Upload to HDFS ──</span><span>
+</span>hdfs dfs -mkdir -p /user/root/project10/input
+hdfs dfs -put /tmp/transactions.txt /user/root/project10/input/
+
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── Step 3: Compile the Java code ──</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Set classpath</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">export</span><span> </span><span class="token assign-left" style="color: rgb(54, 172, 170);">HADOOP_CLASSPATH</span><span class="token" style="color: rgb(57, 58, 52);">=</span><span class="token" style="color: rgb(54, 172, 170);">$(</span><span class="token" style="color: rgb(54, 172, 170);">hadoop classpath</span><span class="token" style="color: rgb(54, 172, 170);">)</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Compile</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">mkdir</span><span> -p /tmp/project10/classes
+</span><span>javac -classpath </span><span class="token" style="color: rgb(54, 172, 170);">$HADOOP_CLASSPATH</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">\</span><span>
+</span><span>      -d /tmp/project10/classes </span><span class="token" style="color: rgb(57, 58, 52);">\</span><span>
+</span>      RegionPartitionJob.java
+
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Create JAR</span><span>
+</span><span>jar -cvf /tmp/project10/region-partition.jar </span><span class="token" style="color: rgb(57, 58, 52);">\</span><span>
+</span><span>    -C /tmp/project10/classes </span><span class="token builtin" style="color: rgb(43, 145, 175);">.</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── Step 4: Run the job ──</span><span>
+</span><span>hadoop jar /tmp/project10/region-partition.jar </span><span class="token" style="color: rgb(57, 58, 52);">\</span><span>
+</span><span>    RegionPartitionJob </span><span class="token" style="color: rgb(57, 58, 52);">\</span><span>
+</span><span>    /user/root/project10/input </span><span class="token" style="color: rgb(57, 58, 52);">\</span><span>
+</span>    /user/root/project10/output
+
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── Step 5: Verify output — THIS IS THE CRITICAL CHECK ──</span><span>
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"═══════════════════════════════════════════════════"</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"VERIFICATION: Each file should contain ONLY one region"</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"═══════════════════════════════════════════════════"</span><span>
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"── part-r-00000 (Expected: ONLY NORTH) ──"</span><span>
+</span>hdfs dfs -cat /user/root/project10/output/part-r-00000
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Expected: 6 NORTH records (TXN001, TXN005, TXN006, TXN011, TXN014, TXN017)</span><span>
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"── part-r-00001 (Expected: ONLY SOUTH) ──"</span><span>
+</span>hdfs dfs -cat /user/root/project10/output/part-r-00001
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Expected: 4 SOUTH records (TXN002, TXN007, TXN012, TXN016, TXN020)</span><span>
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"── part-r-00002 (Expected: ONLY EAST) ──"</span><span>
+</span>hdfs dfs -cat /user/root/project10/output/part-r-00002
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Expected: 4 EAST records (TXN003, TXN008, TXN009, TXN015, TXN019)</span><span>
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"── part-r-00003 (Expected: ONLY WEST) ──"</span><span>
+</span>hdfs dfs -cat /user/root/project10/output/part-r-00003
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Expected: 3 WEST records (TXN004, TXN010, TXN013, TXN018)</span><span>
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"── File sizes (shows data distribution) ──"</span><span>
+</span>hdfs dfs -ls -h /user/root/project10/output/
+
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── Step 6: Compare with what HashPartitioner would produce ──</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"═══════════════════════════════════════════════════"</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"PROOF: Without custom partitioner, regions would be MIXED"</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"═══════════════════════════════════════════════════"</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"HashPartitioner would do:"</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"  'NORTH'.hashCode() = $(python3 -c "
+</span><span class="token" style="color: rgb(163, 21, 21);"># Java's String.hashCode() algorithm
+</span><span class="token" style="color: rgb(163, 21, 21);">def java_hash(s):
+</span><span class="token" style="color: rgb(163, 21, 21);">    h = 0
+</span><span class="token" style="color: rgb(163, 21, 21);">    for c in s:
+</span><span class="token" style="color: rgb(163, 21, 21);">        h = (31 * h + ord(c)) &amp; 0xFFFFFFFF
+</span><span class="token" style="color: rgb(163, 21, 21);">        if h &gt; 0x7FFFFFFF:
+</span><span class="token" style="color: rgb(163, 21, 21);">            h -= 0x100000000
+</span><span class="token" style="color: rgb(163, 21, 21);">    return h
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">regions = ['NORTH', 'SOUTH', 'EAST', 'WEST']
+</span><span class="token" style="color: rgb(163, 21, 21);">for r in regions:
+</span><span class="token" style="color: rgb(163, 21, 21);">    h = java_hash(r)
+</span><span class="token" style="color: rgb(163, 21, 21);">    partition = (h &amp; 0x7FFFFFFF) % 4
+</span><span class="token" style="color: rgb(163, 21, 21);">    print(f'  {r}: hashCode={h}, partition={partition}')
+</span><span class="token" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(163, 21, 21);">"
+</span><span class="token" style="color: rgb(163, 21, 21);">echo "</span><span>"
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"With HashPartitioner: regions assigned by HASH — no guarantee"</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"With our partitioner: regions assigned by EXPLICIT mapping ✓"</span></code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># BONUS: Python script to generate LARGE test data for scaling tests</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> random
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> os
+</span>
+<span></span><span class="token" style="color: rgb(0, 0, 255);">def</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">generate_large_transactions</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>filepath</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> num_records</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> region_distribution</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>    </span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">"""
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    Generate realistic transaction data with controlled region distribution.
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    region_distribution: dict like {"NORTH": 0.40, "SOUTH": 0.25, "EAST": 0.20, "WEST": 0.15}
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    This creates SKEWED data to test partitioner behavior.
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    """</span><span>
+</span><span>    products </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">[</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"Laptop"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">800</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">2000</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"Phone"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">400</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">1200</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"Tablet"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">200</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">800</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"Watch"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">100</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">500</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"Headphones"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">20</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">300</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"Cable"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">5</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">30</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"Monitor"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">200</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">800</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"Keyboard"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">30</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">150</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"Mouse"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">10</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">80</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"SSD"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">50</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">300</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">]</span><span>
+</span>    
+<span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Build weighted region list for random selection</span><span>
+</span><span>    regions </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">for</span><span> region</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> weight </span><span class="token" style="color: rgb(0, 0, 255);">in</span><span> region_distribution</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>items</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>        regions</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>extend</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span>region</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">*</span><span> </span><span class="token builtin">int</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>weight </span><span class="token" style="color: rgb(57, 58, 52);">*</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">1000</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    </span><span class="token" style="color: rgb(0, 0, 255);">with</span><span> </span><span class="token builtin">open</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>filepath</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'w'</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> f</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">for</span><span> i </span><span class="token" style="color: rgb(0, 0, 255);">in</span><span> </span><span class="token builtin">range</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> num_records </span><span class="token" style="color: rgb(57, 58, 52);">+</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>            txn_id </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"TXN</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">i</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">08d</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span>
+</span><span>            cust_id </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"CUST</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">random</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">.</span><span class="token string-interpolation interpolation">randint</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">1</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">,</span><span class="token string-interpolation interpolation"> </span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">100000</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">)</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">06d</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span>
+</span><span>            region </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> random</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>choice</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>regions</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>            product</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> min_price</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> max_price </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> random</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>choice</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>products</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>            amount </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token builtin">round</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>random</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>uniform</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>min_price</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> max_price</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">2</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>            
+<span>            </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Random date in January 2024</span><span>
+</span><span>            day </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> random</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>randint</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">31</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>            timestamp </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"2024-01-</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">day</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">02d</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span>
+</span>            
+<span>            line </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">txn_id</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">|</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">cust_id</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">|</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">region</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">|</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">product</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">|</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">amount</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">|</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">timestamp</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">\n"</span><span>
+</span><span>            f</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>write</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>line</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    file_size_mb </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> os</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>path</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>getsize</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>filepath</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">/</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(54, 172, 170);">1024</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">*</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">1024</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"Generated </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">num_records</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">,</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> records (</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">file_size_mb</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">.1f</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> MB)"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"Region distribution: </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">region_distribution</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>
+
+<span></span><span class="token" style="color: rgb(0, 0, 255);">if</span><span> __name__ </span><span class="token" style="color: rgb(57, 58, 52);">==</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"__main__"</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── Scenario 1: Balanced distribution ──</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"=== BALANCED DISTRIBUTION ==="</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    generate_large_transactions</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>
+</span><span>        </span><span class="token" style="color: rgb(163, 21, 21);">"/tmp/transactions_balanced.txt"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>        num_records</span><span class="token" style="color: rgb(57, 58, 52);">=</span><span class="token" style="color: rgb(54, 172, 170);">1_000_000</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>        region_distribution</span><span class="token" style="color: rgb(57, 58, 52);">=</span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span><span>            </span><span class="token" style="color: rgb(163, 21, 21);">"NORTH"</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">0.25</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>            </span><span class="token" style="color: rgb(163, 21, 21);">"SOUTH"</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">0.25</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>            </span><span class="token" style="color: rgb(163, 21, 21);">"EAST"</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">0.25</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>            </span><span class="token" style="color: rgb(163, 21, 21);">"WEST"</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">0.25</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── Scenario 2: Skewed distribution (realistic) ──</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"\n=== SKEWED DISTRIBUTION ==="</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    generate_large_transactions</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>
+</span><span>        </span><span class="token" style="color: rgb(163, 21, 21);">"/tmp/transactions_skewed.txt"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>        num_records</span><span class="token" style="color: rgb(57, 58, 52);">=</span><span class="token" style="color: rgb(54, 172, 170);">1_000_000</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>        region_distribution</span><span class="token" style="color: rgb(57, 58, 52);">=</span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span><span>            </span><span class="token" style="color: rgb(163, 21, 21);">"NORTH"</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">0.55</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>   </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># 55% of data — will cause reducer imbalance</span><span>
+</span><span>            </span><span class="token" style="color: rgb(163, 21, 21);">"SOUTH"</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">0.20</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>            </span><span class="token" style="color: rgb(163, 21, 21);">"EAST"</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">0.15</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>            </span><span class="token" style="color: rgb(163, 21, 21);">"WEST"</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">0.10</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"\n=== UPLOAD TO HDFS ==="</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"Run these commands:"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"  hdfs dfs -put /tmp/transactions_balanced.txt /user/root/project10/input/"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"  hdfs dfs -put /tmp/transactions_skewed.txt /user/root/project10/input/"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">""</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"Then re-run the job and observe:"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"  → Balanced: all 4 output files similar size"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"  → Skewed: part-r-00000 (NORTH) is 5× larger than part-r-00003 (WEST)"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"  → Skewed: Reducer 0 takes much longer in YARN UI"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"  → THIS is the data skew problem we solve in Project 33"</span><span class="token" style="color: rgb(57, 58, 52);">)</span></code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># DIAGNOSTIC COMMANDS — UNDERSTANDING WHAT HAPPENED</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── Check job counters (verifies partitioning) ──</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># After job completes, counters show in terminal output:</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#   Map-Reduce Framework</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#       Map input records=20</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#       Map output records=20        ← all records emitted</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#       Reduce input groups=4        ← 4 regions = 4 groups</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#       Reduce input records=20      ← all records received</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#       Reduce output records=20     ← all records written</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#   RegionReducer$ReduceCounters</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#       NORTH_RECORDS=6              ← matches our expectation</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#       SOUTH_RECORDS=5</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#       EAST_RECORDS=5</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#       WEST_RECORDS=4</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── Verify no data was lost ──</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Total input records should equal total output records</span><span>
+</span><span></span><span class="token assign-left" style="color: rgb(54, 172, 170);">INPUT_COUNT</span><span class="token" style="color: rgb(57, 58, 52);">=</span><span class="token" style="color: rgb(54, 172, 170);">$(</span><span class="token" style="color: rgb(54, 172, 170);">hdfs dfs -cat /user/root/project10/input/* </span><span class="token" style="color: rgb(57, 58, 52);">|</span><span class="token" style="color: rgb(54, 172, 170);"> </span><span class="token" style="color: rgb(57, 58, 52);">wc</span><span class="token" style="color: rgb(54, 172, 170);"> -l</span><span class="token" style="color: rgb(54, 172, 170);">)</span><span>
+</span><span></span><span class="token assign-left" style="color: rgb(54, 172, 170);">OUTPUT_COUNT</span><span class="token" style="color: rgb(57, 58, 52);">=</span><span class="token" style="color: rgb(54, 172, 170);">$(</span><span class="token" style="color: rgb(54, 172, 170);">hdfs dfs -cat /user/root/project10/output/part-r-* </span><span class="token" style="color: rgb(57, 58, 52);">|</span><span class="token" style="color: rgb(54, 172, 170);"> </span><span class="token" style="color: rgb(57, 58, 52);">wc</span><span class="token" style="color: rgb(54, 172, 170);"> -l</span><span class="token" style="color: rgb(54, 172, 170);">)</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"Input records:  </span><span class="token" style="color: rgb(54, 172, 170);">$INPUT_COUNT</span><span class="token" style="color: rgb(163, 21, 21);">"</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"Output records: </span><span class="token" style="color: rgb(54, 172, 170);">$OUTPUT_COUNT</span><span class="token" style="color: rgb(163, 21, 21);">"</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"Match: </span><span class="token" style="color: rgb(54, 172, 170);">$(</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(54, 172, 170);"> </span><span class="token" style="color: rgb(54, 172, 170);">"</span><span class="token" style="color: rgb(54, 172, 170);">$INPUT_COUNT</span><span class="token" style="color: rgb(54, 172, 170);">"</span><span class="token" style="color: rgb(54, 172, 170);"> -eq </span><span class="token" style="color: rgb(54, 172, 170);">"</span><span class="token" style="color: rgb(54, 172, 170);">$OUTPUT_COUNT</span><span class="token" style="color: rgb(54, 172, 170);">"</span><span class="token" style="color: rgb(54, 172, 170);"> </span><span class="token" style="color: rgb(57, 58, 52);">]</span><span class="token" style="color: rgb(54, 172, 170);"> </span><span class="token" style="color: rgb(57, 58, 52);">&amp;&amp;</span><span class="token" style="color: rgb(54, 172, 170);"> </span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span class="token" style="color: rgb(54, 172, 170);"> YES </span><span class="token" style="color: rgb(57, 58, 52);">||</span><span class="token" style="color: rgb(54, 172, 170);"> </span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span class="token" style="color: rgb(54, 172, 170);"> NO</span><span class="token" style="color: rgb(54, 172, 170);">)</span><span class="token" style="color: rgb(163, 21, 21);">"</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── Verify each file has only one region ──</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">for</span><span> </span><span class="token for-or-select" style="color: rgb(54, 172, 170);">i</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">in</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">0</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">1</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">2</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">3</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">do</span><span>
+</span><span>    </span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"part-r-0000</span><span class="token" style="color: rgb(54, 172, 170);">${i}</span><span class="token" style="color: rgb(163, 21, 21);"> regions:"</span><span>
+</span><span>    hdfs dfs -cat /user/root/project10/output/part-r-0000</span><span class="token" style="color: rgb(54, 172, 170);">${i}</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">\</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">|</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">cut</span><span> -f1 </span><span class="token" style="color: rgb(57, 58, 52);">|</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">sort</span><span> -u
+</span><span>    </span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"---"</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">done</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Expected: Each file shows exactly ONE region name</span></code></pre></div>
+<hr>
+<h2>🔑 KEY TAKEAWAY</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>WHAT PROJECT 10 ESTABLISHED:
+</span>
+✅ PARTITIONER controls which reducer receives which key-value pair
+✅ Default HashPartitioner distributes randomly (by hash)
+✅ Custom Partitioner gives EXPLICIT control over routing
+✅ Number of reducers MUST match your partition logic
+✅ Each reducer writes ONE output file (part-r-NNNNN)
+✅ Partitioner runs on MAP SIDE — before shuffle
+✅ Execution order: Map → Partition → Sort → Combine → Shuffle → Reduce
+
+CONNECTION TO PROJECT 9 (Combiner):
+→ Project 9: Combiner reduces DATA VOLUME before network transfer
+→ Project 10: Partitioner controls DATA ROUTING to reducers
+→ Both run on map side, but serve completely different purposes
+→ Combiner = optimization (less data shipped)
+→ Partitioner = routing (right data to right reducer)
+→ They WORK TOGETHER: partition first, then combine within partition
+
+WHAT WE DID NOT COVER YET:
+→ Map-only jobs where we need NO reducers at all (Project 11)
+→ Composite keys that carry multiple pieces of info (Project 13)
+→ Global sorting where partition boundaries must be calculated (Project 18)
+→ Data skew where one partition overwhelms its reducer (Project 33)</code></pre></div>
+<hr>
+<h2>🌉 BRIDGE TO PROJECT 11</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>PROJECT 10 gave us control over HOW data reaches reducers.
+</span>
+But what if we DON'T NEED reducers at all?
+
+PROJECT 11 asks: "We have messy hospital records with
+missing fields, invalid dates, and duplicate entries.
+We just need to CLEAN them — no aggregation, no grouping."
+
+This introduces:
+→ Map-Only Jobs (zero reducers)
+→ NullWritable (when you don't need a key or value)
+→ Data cleansing as an ETL pattern
+→ Why skipping the reducer saves MASSIVE time
+   (no shuffle = no network transfer = no sort overhead)
+
+The insight: Not every problem needs Map AND Reduce.
+Sometimes Map alone is the entire solution.</code></pre></div>
+<hr>
+</div>
+</div>
+
+<!-- ========== data-index="7" ========== -->
+
+        </div>
+
+        <div class="nav-bar">
+            <a href="project-9.html" class="nav-button prev">← Previous Project</a>
+            <div class="page-info">
+                <a href="index.html" class="nav-button home">📚 Table of Contents</a><br>
+                <span style="margin-top:8px;display:block">Project 10 of 50</span>
+            </div>
+            <a href="project-11.html" class="nav-button next">Next Project →</a>
+        </div>
+    </div>
+
+    
+    <div id="progress-track"><div id="progress-fill"></div></div>
+    <div id="progress-pct">0%</div>
+
+
+<script src="script.js"></script>
+
+</body>
+</html>

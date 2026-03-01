@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/png" href="images/favicon.png">
+    <title>Apache Hadoop Masterclass</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <div class="content">
+            <div class="chat-message" data-index="1">
+<div class="px-2"><h1>🐘 APACHE HADOOP — COMPREHENSIVE 50-PROJECT MASTERY GUIDE</h1>
+<h2>COMPLETE TABLE OF CONTENTS</h2>
+<hr>
+<h1>📋 PHASE 1: VERY EASY — FOUNDATION THINKING (Projects 1–8)</h1>
+<blockquote>
+<p><strong>Theme:</strong> Understanding the Hadoop ecosystem ground-up — what it is, why it exists, how files are stored, and the first taste of distributed computation.</p>
+</blockquote>
+<table><thead><tr><th>#</th><th>Project Title</th><th>Core Concept Introduced</th><th>Link Dependency</th></tr></thead><tbody><tr><td>1</td><td><strong>The Overwhelmed Log Server: Why One Machine Fails</strong></td><td>Distributed Computing Philosophy → Hadoop Architecture Overview → Master-Slave Paradigm</td><td>None (Starting Point)</td></tr><tr><td>2</td><td><strong>Storing a 10GB Text File Nobody Can Open Locally</strong></td><td>HDFS Fundamentals → NameNode → DataNode → Block Splitting (128MB default) → Replication Factor</td><td>Builds on Project 1</td></tr><tr><td>3</td><td><strong>Navigating the Warehouse: Listing, Moving, and Reading HDFS Files</strong></td><td>HDFS Shell Commands → <code>hadoop fs</code> CLI → <code>-put</code> → <code>-get</code> → <code>-ls</code> → <code>-cat</code> → <code>-mkdir</code> → <code>-rm</code></td><td>Builds on Project 2</td></tr><tr><td>4</td><td><strong>Counting Words in a Small Diary: The Hello World of MapReduce</strong></td><td>MapReduce Paradigm → Mapper → Reducer → Driver Class → Job Configuration → Input/Output Paths</td><td>Builds on Projects 2, 3</td></tr><tr><td>5</td><td><strong>Tracking Daily Temperatures From Weather Sensors</strong></td><td>MapReduce Data Flow → Key-Value Pair Mechanics → TextInputFormat → IntWritable → Text Writable Types</td><td>Builds on Project 4</td></tr><tr><td>6</td><td><strong>Finding the Most Popular Product in a Small Shop</strong></td><td>MapReduce Job Chaining Concept → Sorting by Value → Writable Comparable Interface</td><td>Builds on Project 5</td></tr><tr><td>7</td><td><strong>Understanding Why the Job Took So Long: Reading Hadoop Logs</strong></td><td>Job Counters → Task Attempts → Logs via ResourceManager UI → stdout/stderr Debugging</td><td>Builds on Projects 4, 5, 6</td></tr><tr><td>8</td><td><strong>Running Everything Locally Before the Cluster: Pseudo-Distributed Mode</strong></td><td>Hadoop Local Mode → Pseudo-Distributed Mode → core-site.xml → hdfs-site.xml → mapred-site.xml → yarn-site.xml Configuration</td><td>Builds on Projects 1–7</td></tr></tbody></table>
+<hr>
+<h1>📋 PHASE 2: EASY — CORE PATTERNS (Projects 9–15)</h1>
+<blockquote>
+<p><strong>Theme:</strong> Solidifying MapReduce mechanics, understanding the shuffle-sort internals, and learning the first optimization techniques that every Hadoop developer must know.</p>
+</blockquote>
+<table><thead><tr><th>#</th><th>Project Title</th><th>Core Concept Introduced</th><th>Link Dependency</th></tr></thead><tbody><tr><td>9</td><td><strong>Reducing Network Traffic: Summarizing Sales Before Shipping</strong></td><td>Combiner Function → Local Aggregation → Combiner vs. Reducer Contract Rules</td><td>Builds on Project 6</td></tr><tr><td>10</td><td><strong>Distributing Customer Data to Region-Specific Files</strong></td><td>Custom Partitioner → HashPartitioner Default → <code>getPartition()</code> Method → Number of Reducers Control</td><td>Builds on Project 9</td></tr><tr><td>11</td><td><strong>Cleaning Messy Hospital Records Before Analysis</strong></td><td>MapReduce as ETL → Map-Only Jobs (Zero Reducers) → Data Cleansing Patterns → NullWritable</td><td>Builds on Project 5</td></tr><tr><td>12</td><td><strong>Processing CSV, TSV, and JSON: Not Everything is Plain Text</strong></td><td>Custom InputFormat → TextInputFormat vs. KeyValueTextInputFormat → NLineInputFormat → Record Parsing Logic</td><td>Builds on Project 11</td></tr><tr><td>13</td><td><strong>Counting Unique Visitors to a Website Per Hour</strong></td><td>Composite Keys → WritableComparable Custom Implementation → <code>compareTo()</code> → Serialization/Deserialization</td><td>Builds on Projects 10, 12</td></tr><tr><td>14</td><td><strong>Compressing Output to Save Cluster Storage Costs</strong></td><td>Output Compression → Codec Classes (GzipCodec, SnappyCodec, LzoCodec) → Splittable vs. Non-Splittable Compression</td><td>Builds on Project 12</td></tr><tr><td>15</td><td><strong>Sharing a Lookup Table Across All Mappers Without Shipping It Every Time</strong></td><td>Distributed Cache → <code>addCacheFile()</code> → Side Data Distribution → Setup Method Loading</td><td>Builds on Projects 9, 13</td></tr></tbody></table>
+<hr>
+<h1>📋 PHASE 3: MEDIUM — PROFESSIONAL TECHNIQUES (Projects 16–30)</h1>
+<blockquote>
+<p><strong>Theme:</strong> Moving beyond single MapReduce jobs into real-world patterns — joins, chaining, YARN resource management, and the introduction of higher-level Hadoop ecosystem tools.</p>
+</blockquote>
+<table><thead><tr><th>#</th><th>Project Title</th><th>Core Concept Introduced</th><th>Link Dependency</th></tr></thead><tbody><tr><td>16</td><td><strong>Enriching Orders With Customer Names: The Map-Side Join</strong></td><td>Map-Side Join → Distributed Cache for Small Table → In-Memory HashMap Join Pattern</td><td>Builds on Project 15</td></tr><tr><td>17</td><td><strong>Joining Two Massive Datasets: Orders Meets Products</strong></td><td>Reduce-Side Join → Tagging Records by Source → MultipleInputs → Custom Grouping</td><td>Builds on Project 16</td></tr><tr><td>18</td><td><strong>Sorting All Employee Salaries Globally Across the Cluster</strong></td><td>Total Order Partitioner → InputSampler → Partition File Generation → Global Sorting Guarantee</td><td>Builds on Projects 10, 17</td></tr><tr><td>19</td><td><strong>Grouping Transactions by Customer Then Sorting by Date Within Each</strong></td><td>Secondary Sort → Composite Key Partitioning → Custom GroupingComparator → SortComparator</td><td>Builds on Projects 13, 18</td></tr><tr><td>20</td><td><strong>Writing Analysis Results to Multiple Output Directories Simultaneously</strong></td><td>MultipleOutputs → Named Outputs → Dynamic Output Paths → <code>write(key, value, namedOutput)</code></td><td>Builds on Project 19</td></tr><tr><td>21</td><td><strong>Chaining Three MapReduce Jobs Into a Data Pipeline</strong></td><td>Job Chaining → <code>ControlledJob</code> → <code>JobControl</code> → Temporary HDFS Intermediate Paths → Dependency Graph</td><td>Builds on Projects 6, 20</td></tr><tr><td>22</td><td><strong>Who Gets the Resources? Understanding YARN From Inside</strong></td><td>YARN Architecture → ResourceManager → NodeManager → ApplicationMaster → Container Allocation → Capacity Scheduler Basics</td><td>Builds on Project 8</td></tr><tr><td>23</td><td><strong>Tuning Map and Reduce Task Memory to Stop the Cluster Crashing</strong></td><td>YARN Memory Configuration → <code>mapreduce.map.memory.mb</code> → <code>mapreduce.reduce.memory.mb</code> → JVM Heap vs. Container Memory → Speculative Execution</td><td>Builds on Project 22</td></tr><tr><td>24</td><td><strong>Querying Hadoop Data Without Writing Java: Enter Apache Hive</strong></td><td>Apache Hive → HiveQL → Managed vs. External Tables → SerDe → Metastore → Schema-on-Read</td><td>Builds on Projects 3, 21</td></tr><tr><td>25</td><td><strong>Partitioning and Bucketing a Hive Table for Faster Queries</strong></td><td>Hive Partitions → Dynamic Partitioning → Bucketing → <code>CLUSTERED BY</code> → Partition Pruning Performance</td><td>Builds on Project 24</td></tr><tr><td>26</td><td><strong>Building a Data Flow Script Without Java: Apache Pig</strong></td><td>Apache Pig → Pig Latin → LOAD → FILTER → GROUP → FOREACH → STORE → Execution Modes (Local vs. MapReduce)</td><td>Builds on Project 24</td></tr><tr><td>27</td><td><strong>Real-Time Lookups on Hadoop Data: Introduction to HBase</strong></td><td>HBase Architecture → Region → RegionServer → Column Families → Row Key Design → <code>put</code> → <code>get</code> → <code>scan</code></td><td>Builds on Project 2</td></tr><tr><td>28</td><td><strong>Importing a MySQL Database Into HDFS Automatically</strong></td><td>Apache Sqoop → <code>sqoop import</code> → JDBC Connector → <code>--split-by</code> → <code>--target-dir</code> → <code>--as-parquetfile</code> → Incremental Import</td><td>Builds on Projects 3, 24</td></tr><tr><td>29</td><td><strong>Streaming Live Web Server Logs Into HDFS</strong></td><td>Apache Flume → Source → Channel → Sink Architecture → Exec Source → Memory Channel → HDFS Sink → Agent Configuration</td><td>Builds on Projects 2, 3</td></tr><tr><td>30</td><td><strong>Choosing the Right File Format: Text vs. SequenceFile vs. Avro vs. Parquet vs. ORC</strong></td><td>File Format Comparison → SequenceFile (Binary KV) → Avro (Schema Evolution) → Parquet (Columnar) → ORC (Hive-Optimized Columnar) → Splittability Matrix</td><td>Builds on Projects 14, 24, 25</td></tr></tbody></table>
+<hr>
+<h1>📋 PHASE 4: HARD — ADVANCED PATTERNS (Projects 31–40)</h1>
+<blockquote>
+<p><strong>Theme:</strong> Production-grade patterns — orchestration, custom serialization, advanced HBase modeling, performance diagnostics, and building end-to-end pipelines that don't break under pressure.</p>
+</blockquote>
+<table><thead><tr><th>#</th><th>Project Title</th><th>Core Concept Introduced</th><th>Link Dependency</th></tr></thead><tbody><tr><td>31</td><td><strong>Orchestrating a Nightly ETL Pipeline With Apache Oozie</strong></td><td>Apache Oozie → Workflow XML → Coordinator → <code>start</code> → <code>action</code> → <code>fork/join</code> → <code>decision</code> Nodes → Time-Based Triggers</td><td>Builds on Projects 21, 24, 28</td></tr><tr><td>32</td><td><strong>Writing a Custom InputFormat to Parse Binary Sensor Data</strong></td><td>Custom RecordReader → Custom InputFormat → <code>createRecordReader()</code> → <code>nextKeyValue()</code> → Binary File Handling</td><td>Builds on Projects 12, 30</td></tr><tr><td>33</td><td><strong>Processing 1TB of Data: Diagnosing and Fixing Skew</strong></td><td>Data Skew Detection → Salting Keys → Custom Partitioner for Skew → Combiner Optimization → Task Runtime Analysis</td><td>Builds on Projects 9, 10, 23</td></tr><tr><td>34</td><td><strong>Building a Star Schema Data Warehouse on Hive With ORC</strong></td><td>Hive Warehouse Modeling → Fact/Dimension Tables → ORC With Bloom Filters → Vectorized Query Execution → Cost-Based Optimizer (CBO)</td><td>Builds on Projects 25, 30</td></tr><tr><td>35</td><td><strong>Designing an HBase Row Key for Billion-Record Time Series</strong></td><td>HBase Row Key Design Patterns → Salting → Hashing → Reverse Timestamps → Hot-Spotting Prevention → Region Pre-Splitting</td><td>Builds on Project 27</td></tr><tr><td>36</td><td><strong>Bulk Loading 500 Million Records Into HBase Without Killing It</strong></td><td>HBase Bulk Load → HFile Generation via MapReduce → <code>LoadIncrementalHFiles</code> → StoreFile Compaction Awareness</td><td>Builds on Projects 27, 35</td></tr><tr><td>37</td><td><strong>Streaming MapReduce With Python: Hadoop Streaming API</strong></td><td>Hadoop Streaming → stdin/stdout Protocol → Python Mapper → Python Reducer → <code>-mapper</code> → <code>-reducer</code> → <code>-file</code> Arguments</td><td>Builds on Projects 4, 11</td></tr><tr><td>38</td><td><strong>Unit Testing MapReduce Without a Cluster: MRUnit and Local Runners</strong></td><td>MRUnit Framework → MapDriver → ReduceDriver → MapReduceDriver → Integration Testing With MiniDFSCluster → MiniMRCluster</td><td>Builds on Projects 4, 7, 37</td></tr><tr><td>39</td><td><strong>Building a Multi-Tenant Cluster: YARN Queues and Fair Scheduling</strong></td><td>YARN Queue Configuration → CapacityScheduler → FairScheduler → Queue ACLs → Preemption → Resource Limits Per User/Group</td><td>Builds on Projects 22, 23</td></tr><tr><td>40</td><td><strong>End-to-End Pipeline: Ingest → Clean → Transform → Warehouse → Serve</strong></td><td>Full Pipeline Integration → Flume Ingest → MapReduce Clean → Hive Transform → HBase Serve → Oozie Orchestration → Monitoring</td><td>Builds on Projects 28, 29, 31, 34, 36</td></tr></tbody></table>
+<hr>
+<h1>📋 PHASE 5: VERY HARD — MASTERY + BRIDGE TO NEXT SUBJECT (Projects 41–50)</h1>
+<blockquote>
+<p><strong>Theme:</strong> Production hardening, security, high availability, federation, performance at extreme scale, hybrid architectures, and the bridge into modern data engineering (Spark, cloud-native Hadoop, lakehouse).</p>
+</blockquote>
+<table><thead><tr><th>#</th><th>Project Title</th><th>Core Concept Introduced</th><th>Link Dependency</th></tr></thead><tbody><tr><td>41</td><td><strong>Securing the Cluster: Kerberos Authentication for Hadoop</strong></td><td>Hadoop Security Model → Kerberos → KDC → Keytabs → HDFS ACLs → Service-Level Authorization → Delegation Tokens</td><td>Builds on Projects 8, 39</td></tr><tr><td>42</td><td><strong>Encrypting Data at Rest and in Transit on HDFS</strong></td><td>HDFS Transparent Encryption → Encryption Zones → Key Management Server (KMS) → SSL/TLS for Data Transfer → Wire Encryption</td><td>Builds on Project 41</td></tr><tr><td>43</td><td><strong>HDFS Federation: Scaling the NameNode Beyond One Namespace</strong></td><td>HDFS Federation → Multiple NameNodes → Independent Namespaces → Block Pools → ViewFS Client-Side Mount Table</td><td>Builds on Projects 2, 22</td></tr><tr><td>44</td><td><strong>NameNode High Availability: Surviving a Master Node Crash</strong></td><td>HA NameNode → Active/Standby Architecture → JournalNode Quorum → ZooKeeper Failover Controller (ZKFC) → Fencing Methods</td><td>Builds on Projects 2, 43</td></tr><tr><td>45</td><td><strong>ResourceManager High Availability and Recovery</strong></td><td>YARN RM HA → Active/Standby RM → ZooKeeper-Based Election → Work-Preserving RM Restart → NM Recovery</td><td>Builds on Projects 22, 44</td></tr><tr><td>46</td><td><strong>Processing Petabyte-Scale Clickstream With Optimized MapReduce</strong></td><td>Extreme-Scale Tuning → <code>io.sort.mb</code> → <code>io.sort.factor</code> → Shuffle Tuning → JVM Reuse → Uber Tasks → Profiling with YARN Timeline Server</td><td>Builds on Projects 23, 33, 40</td></tr><tr><td>47</td><td><strong>Building a Lambda Architecture: Batch Layer With Hadoop</strong></td><td>Lambda Architecture Concept → Batch Layer (HDFS + MapReduce) → Serving Layer (HBase) → Immutable Master Dataset → Batch Views Recomputation</td><td>Builds on Projects 36, 40</td></tr><tr><td>48</td><td><strong>Migrating a Hadoop Pipeline to Apache Spark: Side-by-Side</strong></td><td>Spark vs. MapReduce → RDD Lineage vs. Disk I/O → DAG Execution → Spark on YARN → Migration Strategy → When Hadoop MapReduce Still Wins</td><td>Builds on Projects 21, 40, 46</td></tr><tr><td>49</td><td><strong>Running Hadoop Workloads on Cloud: S3, EMRFS, and ADLS</strong></td><td>Cloud-Native Hadoop → S3 as HDFS Replacement → EMRFS Consistency → <code>s3a://</code> Connector → ADLS Gen2 → Ephemeral Clusters → Separation of Storage and Compute</td><td>Builds on Projects 44, 45, 48</td></tr><tr><td>50</td><td><strong>Capstone: Production-Grade Data Platform — Design, Build, Harden, Monitor</strong></td><td>Full Platform Architecture → Cluster Sizing → Rack Awareness → Monitoring (Ambari/Cloudera Manager) → Alerting → Capacity Planning → Disaster Recovery → Documentation-as-Code</td><td>Builds on All Projects (1–49)</td></tr></tbody></table>
+<hr>
+<h2>🔗 DEPENDENCY GRAPH SUMMARY</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>Project 1 (Philosophy)
+</span>  └→ Project 2 (HDFS)
+       ├→ Project 3 (HDFS CLI)
+       │    ├→ Project 4 (First MapReduce)
+       │    │    ├→ Project 5 (MR Data Flow)
+       │    │    │    ├→ Project 6 (Sorting/Chaining Intro)
+       │    │    │    │    ├→ Project 9 (Combiner)
+       │    │    │    │    └→ Project 21 (Job Chaining)
+       │    │    │    ├→ Project 11 (Map-Only ETL)
+       │    │    │    │    ├→ Project 12 (InputFormats)
+       │    │    │    │    │    ├→ Project 13 (Composite Keys)
+       │    │    │    │    │    ├→ Project 14 (Compression)
+       │    │    │    │    │    └→ Project 32 (Custom InputFormat)
+       │    │    │    │    └→ Project 37 (Streaming API)
+       │    │    │    └→ Project 10 (Partitioner)
+       │    │    │         ├→ Project 18 (Total Order)
+       │    │    │         └→ Project 33 (Skew Fixing)
+       │    │    └→ Project 7 (Logs/Counters)
+       │    │         └→ Project 38 (Testing)
+       │    ├→ Project 28 (Sqoop)
+       │    └→ Project 29 (Flume)
+       ├→ Project 27 (HBase)
+       │    ├→ Project 35 (Row Key Design)
+       │    │    └→ Project 36 (Bulk Load)
+       │    └→ Project 47 (Lambda Architecture)
+       ├→ Project 43 (HDFS Federation)
+       │    └→ Project 44 (NameNode HA)
+       │         └→ Project 45 (RM HA)
+       │              └→ Project 49 (Cloud Hadoop)
+       └→ Project 8 (Configuration/Modes)
+            ├→ Project 22 (YARN Architecture)
+            │    ├→ Project 23 (YARN Memory Tuning)
+            │    │    ├→ Project 39 (Multi-Tenancy)
+            │    │    └→ Project 46 (Petabyte Tuning)
+            │    └→ Project 45 (RM HA)
+            └→ Project 41 (Kerberos Security)
+                 └→ Project 42 (Encryption)
+
+  Project 24 (Hive) → 25 (Partition/Bucket) → 30 (File Formats) → 34 (Star Schema)
+  Project 24 (Hive) → 26 (Pig)
+  Project 40 (E2E Pipeline) → 46, 47, 48
+  Project 48 (Spark Migration) → 49 (Cloud)
+  Project 50 (Capstone) ← ALL</code></pre></div>
+<hr>
+<h2>✅ READY FOR PROJECT 1</h2>
+</div>
+</div>
+
+<!-- ========== data-index="3" ========== -->
+
+        </div>
+
+        <div class="nav-bar">
+            <a href="index.html" class="nav-button prev">← 📚 Home</a>
+            <div class="page-info">
+                <a href="index.html" class="nav-button home">📚 Table of Contents</a><br>
+                <span style="margin-top:8px;display:block">Project 0 of 50</span>
+            </div>
+            <a href="project-1.html" class="nav-button next">Next Project →</a>
+        </div>
+    </div>
+
+    
+    <div id="progress-track"><div id="progress-fill"></div></div>
+    <div id="progress-pct">0%</div>
+
+
+<script src="script.js"></script>
+
+</body>
+</html>

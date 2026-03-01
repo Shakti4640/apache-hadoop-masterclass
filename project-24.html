@@ -1,0 +1,1820 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/png" href="images/favicon.png">
+    <title>Project 24: QUERYING HADOOP DATA WITHOUT WRITING JAVA — ENTER APACHE HIVE — Apache Hadoop Masterclass</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <div class="content">
+            <div class="chat-message" data-index="27">
+<div class="px-2"><h1>PROJECT 24: QUERYING HADOOP DATA WITHOUT WRITING JAVA — ENTER APACHE HIVE</h1>
+<hr>
+<h2>🔴 HYPOTHETICAL PROBLEM</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>SCENARIO:
+</span>→ You are the data platform lead at an online retail company
+→ 2 billion order records stored in HDFS (from pipelines built in Project 21)
+→ Data cleaned, enriched, and sorted through MapReduce (Projects 11-20)
+→ YARN manages resources across 50 nodes (Projects 22-23)
+
+THREE TEAMS need to query this data:
+
+TEAM 1 — Business Analysts:
+  "Give me total revenue per product category for Q2 2024"
+  → They know SQL. They do NOT know Java.
+  → Writing a MapReduce job takes 2 weeks of developer time.
+  → They need answers in HOURS, not weeks.
+
+TEAM 2 — Data Engineers:
+  "Create a daily summary table from raw order events"
+  → They CAN write MapReduce but it takes 200 lines of Java
+    for what is essentially: INSERT INTO summary SELECT ... GROUP BY
+  → They want to express ETL transformations in 10 lines, not 200.
+
+TEAM 3 — Data Scientists:
+  "Join orders with customer demographics and product catalog,
+   filter to high-value customers, aggregate by region"
+  → This requires:
+    Reduce-Side Join (Project 17) + Custom Partitioner (Project 10)
+    + Secondary Sort (Project 19) + MultipleOutputs (Project 20)
+  → Four Java classes, hundreds of lines, days of development.
+  → In SQL: a 15-line query.
+
+THE CORE PROBLEM:
+→ MapReduce is POWERFUL but LOW-LEVEL
+→ Every analysis requires:
+    Custom Mapper class
+    Custom Reducer class
+    Custom key types (WritableComparable — Project 13)
+    Driver configuration (20+ settings)
+    Compile → JAR → submit → wait → debug → repeat
+→ SQL expresses the SAME logic in 1/20th the code
+→ 90% of big data questions are answerable with SQL patterns:
+    SELECT, WHERE, GROUP BY, JOIN, ORDER BY, aggregate functions
+
+WHAT IF:
+→ You could write SQL
+→ It AUTOMATICALLY becomes optimized MapReduce jobs
+→ Runs on your existing HDFS data and YARN cluster
+→ No Java compilation, no JAR files, no custom Writables
+
+THIS IS APACHE HIVE.</code></pre></div>
+<hr>
+<h2>🔍 HOW TO APPROACH IT</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>STEP 1: Understand what Hive IS and IS NOT
+</span>
+  ┌────────────────────────────────────────────────────────────────┐
+  │              HIVE IS                    │  HIVE IS NOT         │
+  ├────────────────────────────────────────┼──────────────────────┤
+  │ SQL interface to Hadoop                │ A database           │
+  │ Query engine for HDFS data             │ A replacement for    │
+  │ Schema catalog (Metastore)             │   MySQL/PostgreSQL   │
+  │ ETL tool for data warehousing          │ Real-time query      │
+  │ Batch processing via SQL               │   engine             │
+  │ Compiler: SQL → MapReduce/Tez/Spark    │ OLTP system          │
+  │ Schema-on-Read system                  │ Schema-on-Write      │
+  └────────────────────────────────────────┴──────────────────────┘
+
+  TRADITIONAL DATABASE (Schema-on-Write):
+    → Define schema BEFORE loading data
+    → Data validated and structured DURING write
+    → Query is fast (data already organized)
+    → Loading is slow (must validate + index)
+
+  HIVE (Schema-on-Read):
+    → Load raw data into HDFS (any format)
+    → Define schema WHEN you query
+    → Loading is instant (just copy files to HDFS)
+    → Query applies schema at read time (slower reads)
+    → Schema can CHANGE without reloading data
+
+STEP 2: Understand Hive's architecture
+
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                     HIVE ARCHITECTURE                           │
+  │                                                                 │
+  │  ┌──────────┐                                                  │
+  │  │  USER     │  HiveQL query                                   │
+  │  │  (CLI /   │─────────────────┐                               │
+  │  │  Beeline) │                 │                                │
+  │  └──────────┘                 ▼                                │
+  │                        ┌──────────────┐                        │
+  │                        │  HIVE DRIVER  │                        │
+  │                        │              │                        │
+  │                        │  1. Parser   │ → SQL → AST            │
+  │                        │  2. Semantic │ → Validate against     │
+  │                        │     Analyzer │   Metastore schema     │
+  │                        │  3. Optimizer│ → Query plan           │
+  │                        │  4. Compiler │ → MapReduce/Tez DAG    │
+  │                        │  5. Executor │ → Submit to YARN       │
+  │                        └──────┬───────┘                        │
+  │                               │                                 │
+  │               ┌───────────────┼───────────────┐                │
+  │               ▼               ▼               ▼                │
+  │        ┌────────────┐  ┌───────────┐  ┌────────────┐          │
+  │        │ METASTORE  │  │   HDFS    │  │    YARN    │          │
+  │        │            │  │           │  │            │          │
+  │        │ Table defs │  │ Actual    │  │ Executes   │          │
+  │        │ Column types│  │ data files│  │ MR/Tez    │          │
+  │        │ Partitions │  │ (CSV, ORC,│  │ jobs       │          │
+  │        │ Location   │  │  Parquet) │  │            │          │
+  │        │            │  │           │  │ (Proj 22)  │          │
+  │        │ (MySQL/    │  │ (Proj 2-3)│  │            │          │
+  │        │  Derby DB) │  │           │  │            │          │
+  │        └────────────┘  └───────────┘  └────────────┘          │
+  │                                                                 │
+  └─────────────────────────────────────────────────────────────────┘
+
+  KEY INSIGHT: Hive does NOT store data.
+  → Data lives in HDFS (as always)
+  → Hive only stores METADATA (schema) in the Metastore
+  → Metastore is a small relational database (MySQL/PostgreSQL/Derby)
+  → When you query: Hive reads schema from Metastore,
+    applies it to HDFS files, compiles to MapReduce, submits to YARN
+
+STEP 3: Understand the query compilation pipeline
+
+  HiveQL Query:
+    SELECT category, SUM(amount) as revenue
+    FROM orders
+    WHERE order_date &gt;= '2024-04-01'
+    GROUP BY category
+    ORDER BY revenue DESC;
+
+  COMPILATION STEPS:
+    1. PARSE:     SQL text → Abstract Syntax Tree (AST)
+    2. ANALYZE:   Validate table/column names against Metastore
+    3. OPTIMIZE:  Push down predicates, prune partitions
+    4. COMPILE:   Generate MapReduce job(s):
+                  Job 1: Map(filter+project) → Reduce(GROUP BY SUM)
+                  Job 2: Map(identity) → Reduce(ORDER BY) [1 reducer]
+    5. EXECUTE:   Submit to YARN (Project 22)
+    6. RETURN:    Collect output from HDFS → display to user</code></pre></div>
+<hr>
+<h2>💡 HOW CAN WE SOLVE IT</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>SOLUTION: Install Hive, create tables over existing HDFS data,
+</span>          query with SQL instead of writing MapReduce Java code
+
+  ┌────────────────────────────────────────────────────────────────┐
+  │  BEFORE HIVE (Project 4-21 approach):                         │
+  │                                                                │
+  │  → Write ShipmentMapper.java (40 lines)                       │
+  │  → Write ShipmentReducer.java (30 lines)                      │
+  │  → Write ShipmentDriver.java (50 lines)                       │
+  │  → Write custom WritableComparable (60 lines)                 │
+  │  → Compile: javac → jar                                       │
+  │  → Submit: hadoop jar shipment-analysis.jar ...               │
+  │  → Wait 30 minutes for results                                │
+  │  → Debug, fix, recompile, resubmit                            │
+  │  → TOTAL: 180 lines of Java, 4 hours of development          │
+  │                                                                │
+  │  AFTER HIVE:                                                   │
+  │                                                                │
+  │  SELECT category, SUM(amount) as revenue                      │
+  │  FROM orders                                                   │
+  │  WHERE order_date &gt;= '2024-04-01'                             │
+  │  GROUP BY category                                             │
+  │  ORDER BY revenue DESC;                                        │
+  │                                                                │
+  │  → TOTAL: 5 lines of SQL, 2 minutes of development           │
+  │  → Same MapReduce jobs generated AUTOMATICALLY                │
+  │  → Same YARN resource allocation                              │
+  │  → Same HDFS data access                                      │
+  └────────────────────────────────────────────────────────────────┘</code></pre></div>
+<hr>
+<h2>✅ WHAT SHOULD DO</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>1. UNDERSTAND MANAGED vs EXTERNAL TABLES — THE CRITICAL DISTINCTION
+</span>
+   ┌────────────────────────────────────────────────────────────────┐
+   │                                                                │
+   │  MANAGED TABLE (default):                                     │
+   │    CREATE TABLE orders (...)                                  │
+   │                                                                │
+   │    → Hive OWNS the data                                       │
+   │    → Data stored in Hive's warehouse directory                │
+   │      (/user/hive/warehouse/orders/)                           │
+   │    → DROP TABLE → DELETES DATA FROM HDFS                     │
+   │    → Good for: Hive-created data, intermediate tables        │
+   │                                                                │
+   │  EXTERNAL TABLE:                                              │
+   │    CREATE EXTERNAL TABLE orders (...)                         │
+   │    LOCATION '/data/orders/'                                   │
+   │                                                                │
+   │    → Hive does NOT own the data                               │
+   │    → Data stays in YOUR HDFS directory                        │
+   │    → DROP TABLE → Deletes only METADATA (schema)             │
+   │    → Data in HDFS remains UNTOUCHED                          │
+   │    → Good for: Existing HDFS data, shared datasets           │
+   │    → RECOMMENDED for production — prevents accidental deletion│
+   │                                                                │
+   └────────────────────────────────────────────────────────────────┘
+
+   RULE: Use EXTERNAL tables for data loaded by pipelines (Project 21)
+         Use MANAGED tables for Hive-created intermediate results
+
+2. UNDERSTAND SerDe (Serializer/Deserializer)
+
+   → SerDe tells Hive HOW to read and write data files
+   → Different SerDes for different file formats:
+
+   ┌─────────────────────────┬─────────────────────────────────────┐
+   │ SerDe                   │ Format                              │
+   ├─────────────────────────┼─────────────────────────────────────┤
+   │ LazySimpleSerDe         │ Delimited text (CSV/TSV) — default │
+   │ OpenCSVSerde            │ Proper CSV with quoting             │
+   │ JsonSerDe               │ JSON records (one per line)         │
+   │ OrcSerde                │ ORC columnar (Project 30)           │
+   │ ParquetHiveSerDe        │ Parquet columnar (Project 30)       │
+   │ RegexSerDe              │ Regex-parsed text (log files)       │
+   │ AvroSerDe               │ Avro with schema evolution          │
+   └─────────────────────────┴─────────────────────────────────────┘
+
+3. ALWAYS SPECIFY ROW FORMAT FOR TEXT DATA
+   → Default delimiter is Ctrl+A (^A, ASCII 1) — NOT comma
+   → If your data uses | as delimiter (like our pipeline outputs):
+
+   ROW FORMAT DELIMITED
+     FIELDS TERMINATED BY '|'
+     LINES TERMINATED BY '\n'
+
+4. USE EXPLAIN TO UNDERSTAND QUERY EXECUTION
+   → EXPLAIN SELECT ... shows the execution plan
+   → Reveals: number of MapReduce stages, join strategies, partition pruning
+   → ALWAYS run EXPLAIN before large queries on production data
+
+5. START WITH Tez EXECUTION ENGINE INSTEAD OF MapReduce
+   → Hive can compile to MapReduce (classic) or Tez (modern)
+   → Tez is 5-10x faster than MapReduce for Hive queries
+   → SET hive.execution.engine=tez;
+   → Tez uses DAG execution (no intermediate HDFS writes between stages)
+   → If Tez not available: MapReduce works but is slower</code></pre></div>
+<hr>
+<h2>🚫 WHAT SHOULD NOT DO</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>1. DO NOT use Hive for low-latency queries
+</span>   → Even simple SELECT COUNT(*) takes 20-30 seconds minimum
+   → MapReduce startup overhead (JVM, container allocation)
+   → For sub-second queries: use HBase (Project 27), Druid, or Impala
+   → Hive is for BATCH analytics, not interactive dashboards
+
+2. DO NOT use managed tables for shared production data
+   → If pipeline (Project 21) writes to /data/orders/
+   → And you CREATE TABLE orders (...) [managed] LOCATION '/data/orders/'
+   → DROP TABLE orders → DELETES /data/orders/ from HDFS
+   → Pipeline output DESTROYED
+   → ALWAYS use EXTERNAL TABLE for shared data
+
+3. DO NOT treat Hive like a transactional database
+   → No row-level UPDATE/DELETE (Hive 0.x-1.x)
+   → Hive 2.x+ supports ACID transactions but they are SLOW
+   → No indexes in the traditional sense
+   → No primary keys/foreign keys enforcement
+   → Hive is a DATA WAREHOUSE tool, not an OLTP database
+
+4. DO NOT load data with INSERT INTO for large datasets
+   → INSERT INTO orders SELECT ... FROM raw_orders
+   → This runs a MapReduce job — slow for initial data load
+   → For initial load: LOAD DATA or just point EXTERNAL TABLE to HDFS path
+   → LOAD DATA INPATH '/data/raw/' INTO TABLE orders
+     → Moves files from /data/raw/ to Hive warehouse directory
+   → LOAD DATA LOCAL INPATH '/local/file' INTO TABLE orders
+     → Copies from local filesystem to HDFS warehouse
+
+5. DO NOT ignore the Metastore database
+   → Default: embedded Derby database (single-user, NOT for production)
+   → Production: MySQL or PostgreSQL for Metastore
+   → Derby allows only ONE Hive session at a time
+   → Multiple users → MySQL/PostgreSQL Metastore REQUIRED
+
+6. DO NOT use SELECT * on multi-billion-row tables without LIMIT
+   → SELECT * FROM orders; → reads ALL 2 billion rows
+   → Launches MapReduce job to read entire dataset
+   → Takes hours and returns more data than you can use
+   → ALWAYS: SELECT * FROM orders LIMIT 10; for exploration</code></pre></div>
+<hr>
+<h2>🔀 WHEN TO USE WHAT</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>┌───────────────────────────────────────┬──────────────────────────────────┐
+</span>│ NEED                                  │ TOOL                             │
+├───────────────────────────────────────┼──────────────────────────────────┤
+│ Ad-hoc SQL queries on HDFS data       │ Hive (THIS project)              │
+├───────────────────────────────────────┼──────────────────────────────────┤
+│ ETL transformations expressible in SQL│ Hive INSERT OVERWRITE ... SELECT │
+├───────────────────────────────────────┼──────────────────────────────────┤
+│ Custom binary processing, complex     │ Raw MapReduce (Projects 4-21)    │
+│ algorithms not expressible in SQL     │                                  │
+├───────────────────────────────────────┼──────────────────────────────────┤
+│ Sub-second query latency              │ HBase (Project 27), Impala,      │
+│                                       │ Presto, Druid                    │
+├───────────────────────────────────────┼──────────────────────────────────┤
+│ Data flow scripting (not SQL)         │ Apache Pig (Project 26)          │
+├───────────────────────────────────────┼──────────────────────────────────┤
+│ Iterative ML algorithms               │ Spark MLlib (Project 48)         │
+├───────────────────────────────────────┼──────────────────────────────────┤
+│ Real-time stream processing           │ Kafka + Flink/Spark Streaming    │
+├───────────────────────────────────────┼──────────────────────────────────┤
+│ Import from RDBMS to HDFS             │ Sqoop (Project 28) then Hive     │
+├───────────────────────────────────────┼──────────────────────────────────┤
+│ Schema catalog for HDFS data          │ Hive Metastore (even without     │
+│                                       │ Hive queries — Spark uses it too)│
+└───────────────────────────────────────┴──────────────────────────────────┘
+
+HIVE EXECUTION ENGINE COMPARISON:
+┌─────────────────┬──────────────────┬───────────────────┐
+│ Engine          │ Speed            │ When to Use        │
+├─────────────────┼──────────────────┼───────────────────┤
+│ MapReduce       │ Slowest          │ Legacy, guaranteed │
+│                 │ (disk between    │ compatibility      │
+│                 │  stages)         │                    │
+├─────────────────┼──────────────────┼───────────────────┤
+│ Tez             │ 5-10x faster     │ Default in modern  │
+│                 │ (DAG, pipelining)│ Hive (recommended) │
+├─────────────────┼──────────────────┼───────────────────┤
+│ Spark           │ Similar to Tez   │ If Spark is your   │
+│                 │ (in-memory)      │ primary engine      │
+└─────────────────┴──────────────────┴───────────────────┘</code></pre></div>
+<hr>
+<h2>🚫 WHEN NOT TO USE</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>1. REAL-TIME / LOW-LATENCY QUERIES
+</span>   → Hive minimum query time: 20-30 seconds
+   → Dashboard with 100ms response → NOT Hive
+   → Use Impala, Presto, or Druid for interactive analytics
+
+2. TRANSACTIONAL WORKLOADS (OLTP)
+   → Frequent inserts, updates, deletes of individual rows
+   → Hive is OLAP (analytics) not OLTP (transactions)
+   → Use PostgreSQL, MySQL, or HBase for transactional needs
+
+3. SMALL DATASETS (&lt; 1GB)
+   → Hive overhead (compilation, YARN, HDFS) dominates
+   → 100MB CSV file → pandas, SQLite, or DuckDB is 100x faster
+   → Hive shines at 10GB+ scale
+
+4. COMPLEX GRAPH ALGORITHMS
+   → PageRank, graph traversal, connected components
+   → Not expressible in SQL efficiently
+   → Use Spark GraphX or custom MapReduce
+
+5. WHEN DATA FORMAT IS TRULY CUSTOM BINARY
+   → Custom InputFormat (Project 32) needed
+   → Hive SerDes can handle many formats but not arbitrary binary
+   → Preprocess with MapReduce, then query with Hive
+
+6. MACHINE LEARNING MODEL TRAINING
+   → Hive can prepare features (SQL is great for feature engineering)
+   → But model training (gradient descent, etc.) needs Spark MLlib
+   → Pattern: Hive for feature prep → Spark for training</code></pre></div>
+<hr>
+<h2>⚙️ HOW IT ONLY WORKS — INTERNAL MECHANICS</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>═══════════════════════════════════════════════════════════════
+</span>INTERNAL MECHANIC 1: QUERY COMPILATION — SQL TO MapReduce
+═══════════════════════════════════════════════════════════════
+
+  Given query:
+    SELECT category, SUM(amount) as revenue
+    FROM orders
+    WHERE order_date &gt;= '2024-04-01'
+    GROUP BY category;
+
+  STEP 1 — PARSING (SQL → AST):
+    ┌──────────────────────────────────────┐
+    │  AST (Abstract Syntax Tree):         │
+    │                                      │
+    │       SELECT                         │
+    │      /      \                        │
+    │   columns    FROM                    │
+    │   /    \       |                     │
+    │ category SUM  orders                │
+    │           |      |                   │
+    │         amount  WHERE                │
+    │                   |                   │
+    │              order_date &gt;= 2024-04-01│
+    │                   |                   │
+    │              GROUP BY                │
+    │                   |                   │
+    │              category                │
+    └──────────────────────────────────────┘
+
+  STEP 2 — SEMANTIC ANALYSIS:
+    → Query Metastore: "Does table 'orders' exist?"
+    → Metastore returns: {
+        table: "orders",
+        columns: [
+          {name: "order_id", type: "STRING"},
+          {name: "order_date", type: "STRING"},
+          {name: "category", type: "STRING"},
+          {name: "amount", type: "DOUBLE"}
+        ],
+        location: "hdfs:///user/hive/warehouse/orders",
+        inputFormat: "TextInputFormat",
+        serDe: "LazySimpleSerDe",
+        fieldDelimiter: "|"
+      }
+    → Validate: column "category" exists? YES
+    → Validate: SUM(amount) — is amount numeric? YES
+    → Validate: order_date &gt;= '2024-04-01' — type compatible? YES
+
+  STEP 3 — LOGICAL PLAN:
+    TableScan(orders)
+      → Filter(order_date &gt;= '2024-04-01')
+        → Project(category, amount)
+          → GroupBy(category, SUM(amount))
+            → Select(category, revenue)
+
+  STEP 4 — PHYSICAL PLAN (MapReduce):
+    ┌──────────────────────────────────────────────────────┐
+    │  MapReduce Job 1:                                    │
+    │                                                      │
+    │  MAPPER:                                             │
+    │    → Read HDFS files using TextInputFormat            │
+    │    → Apply SerDe to parse each line                  │
+    │    → Apply WHERE filter (order_date &gt;= '2024-04-01') │
+    │    → Emit: key=category, value=amount                │
+    │    → Combiner: partial SUM per category per mapper   │
+    │                                                      │
+    │  REDUCER:                                            │
+    │    → Receive all amounts for each category           │
+    │    → Compute SUM(amount)                             │
+    │    → Emit: category, revenue                         │
+    └──────────────────────────────────────────────────────┘
+
+  THIS IS EXACTLY the MapReduce pattern from Projects 4-9:
+    → Mapper = map() with filter (Project 11)
+    → Combiner = local aggregation (Project 9)
+    → Reducer = final aggregation (Project 6)
+    → Hive GENERATES this code automatically
+
+═══════════════════════════════════════════════════════════════
+INTERNAL MECHANIC 2: HOW THE METASTORE WORKS
+═══════════════════════════════════════════════════════════════
+
+  Metastore is a SEPARATE SERVICE backed by a relational database:
+
+  ┌──────────────────────────────────────────────────────────┐
+  │  METASTORE DATABASE (MySQL/PostgreSQL/Derby)             │
+  │                                                          │
+  │  TABLE: DBS                                              │
+  │    db_id=1, name="default", location="/user/hive/wh"    │
+  │    db_id=2, name="retail",  location="/user/hive/wh/ret"│
+  │                                                          │
+  │  TABLE: TBLS                                             │
+  │    tbl_id=1, db_id=1, tbl_name="orders",                │
+  │    tbl_type="EXTERNAL_TABLE",                            │
+  │    location="/data/orders"                               │
+  │                                                          │
+  │  TABLE: COLUMNS_V2                                       │
+  │    cd_id=1, column_name="order_id", type="string", pos=0│
+  │    cd_id=1, column_name="order_date", type="string",pos=1│
+  │    cd_id=1, column_name="category", type="string", pos=2│
+  │    cd_id=1, column_name="amount", type="double", pos=3  │
+  │                                                          │
+  │  TABLE: SDS (Storage Descriptors)                        │
+  │    sd_id=1, input_format="TextInputFormat",              │
+  │    output_format="HiveIgnoreKeyTextOutputFormat",        │
+  │    serde="LazySimpleSerDe",                              │
+  │    location="/data/orders"                               │
+  │                                                          │
+  │  TABLE: SERDE_PARAMS                                     │
+  │    serde_id=1, param_key="field.delim", param_value="|" │
+  │                                                          │
+  │  TABLE: PARTITIONS (if partitioned — Project 25)         │
+  │    part_id=1, tbl_id=1, part_name="year=2024/month=06" │
+  │    part_location="/data/orders/year=2024/month=06"      │
+  └──────────────────────────────────────────────────────────┘
+
+  KEY INSIGHT:
+  → Metastore is TINY (few MB) — just metadata
+  → Actual data is HUGE (TBs) — lives in HDFS
+  → Separation enables Schema-on-Read:
+    Same HDFS files can be queried with DIFFERENT schemas
+    (e.g., add a column later — old data has NULLs for it)
+
+═══════════════════════════════════════════════════════════════
+INTERNAL MECHANIC 3: HOW SerDe READS DATA
+═══════════════════════════════════════════════════════════════
+
+  When mapper processes an HDFS file line:
+
+    Raw line: "ORD001 | 2024-06-15 | Electronics | 1299.99"
+
+  STEP A — InputFormat splits into records
+    → TextInputFormat returns one line as Text value
+    → Key = byte offset, Value = entire line
+
+  STEP B — SerDe DESERIALIZES the line
+    → LazySimpleSerDe with field.delim="|"
+    → Splits: ["ORD001", "2024-06-15", "Electronics", "1299.99"]
+    → Maps to columns by POSITION:
+      position 0 → order_id = "ORD001" (STRING)
+      position 1 → order_date = "2024-06-15" (STRING)
+      position 2 → category = "Electronics" (STRING)
+      position 3 → amount = 1299.99 (DOUBLE — parsed from string)
+
+  STEP C — Hive operator processes deserialized row
+    → WHERE filter: "2024-06-15" &gt;= "2024-04-01"? YES → keep
+    → PROJECT: extract category, amount
+    → Emit to shuffle: key="Electronics", value=1299.99
+
+  "LAZY" in LazySimpleSerDe means:
+    → Fields are NOT deserialized until actually ACCESSED
+    → If query only uses columns 2 and 3
+    → Columns 0 and 1 are never parsed → saves CPU
+    → Significant speedup for wide tables (100+ columns)
+
+═══════════════════════════════════════════════════════════════
+INTERNAL MECHANIC 4: SCHEMA-ON-READ vs SCHEMA-ON-WRITE
+═══════════════════════════════════════════════════════════════
+
+  SCHEMA-ON-WRITE (Traditional RDBMS):
+    1. CREATE TABLE orders (id INT, amount DECIMAL(10,2))
+    2. INSERT INTO orders VALUES ('abc', 99.99)
+       → ERROR: 'abc' is not INT — rejected at write time
+    3. Data in table is ALWAYS valid against schema
+
+  SCHEMA-ON-READ (Hive):
+    1. Upload CSV to HDFS: /data/orders/data.csv
+       → No validation — just raw files
+    2. CREATE EXTERNAL TABLE orders (id INT, amount DOUBLE)
+       LOCATION '/data/orders/'
+       → Schema applied ONLY when reading
+    3. SELECT * FROM orders
+       → Row with 'abc' in id column → returns NULL (parse failure)
+       → No error — silently returns NULL for unparseable fields
+
+  IMPLICATIONS:
+    → Loading data is INSTANT (no validation overhead)
+    → Bad data discovered at QUERY time, not load time
+    → Schema evolution is easy: ALTER TABLE ADD COLUMNS
+    → Old files still readable — new columns return NULL
+    → RISK: Garbage data silently produces NULLs
+    → MITIGATION: Data quality checks in pipeline (Project 11)</code></pre></div>
+<hr>
+<h2>⚠️ COMMON PITFALLS AND FAILURE MODES</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>PITFALL 1: "SELECT * returns all NULLs"
+</span>→ CAUSE: Schema doesn't match actual data format
+→ Table defined with comma delimiter but data uses pipe (|)
+→ All parsing fails silently → every field is NULL
+→ FIX: Verify delimiter matches:
+   ROW FORMAT DELIMITED FIELDS TERMINATED BY '|'
+→ DEBUG: SELECT * FROM orders LIMIT 5;
+   If all NULLs → delimiter mismatch
+
+PITFALL 2: "Query returns wrong number of columns"
+→ CAUSE: Column count in schema doesn't match fields in data
+→ Table has 4 columns, data has 6 fields
+→ Extra fields silently ignored
+→ OR: Table has 6 columns, data has 4 fields
+→ Extra columns return NULL
+→ FIX: COUNT fields in data file, match schema exactly
+
+PITFALL 3: "DROP TABLE deleted my production data"
+→ CAUSE: Used MANAGED table instead of EXTERNAL table
+→ DROP TABLE on managed table → HDFS data deleted
+→ FIX: ALWAYS use EXTERNAL TABLE for shared/pipeline data
+→ RECOVERY: If HDFS trash enabled → recover from trash
+   hdfs dfs -ls /user/root/.Trash/Current/data/orders/
+
+PITFALL 4: "Hive query runs for hours on small data"
+→ CAUSE: Unnecessary MapReduce job for simple queries
+→ SELECT * FROM orders LIMIT 10 → launches MapReduce!
+→ FIX: Enable fetch mode for simple queries:
+   SET hive.fetch.task.conversion=more;
+   → Simple SELECTs read HDFS directly without MapReduce
+   → Dramatically faster for exploration
+
+PITFALL 5: "Cannot connect — Metastore not running"
+→ CAUSE: Hive Metastore service not started
+→ In standalone mode: metastore embedded in Hive CLI
+→ In production: separate Metastore service required
+→ FIX: Start metastore: hive --service metastore &amp;
+
+PITFALL 6: "String comparison gives wrong results for dates"
+→ CAUSE: Dates stored as STRING type, not DATE type
+→ String comparison: "2024-06-15" &gt; "2024-04-01" works for YYYY-MM-DD
+→ BUT: "6/15/2024" &gt; "4/1/2024" → WRONG (lexicographic: "6" &gt; "4" OK,
+   but "12/1/2024" &lt; "4/1/2024" because "1" &lt; "4")
+→ FIX: Use DATE type, or ensure YYYY-MM-DD format for string dates</code></pre></div>
+<hr>
+<h2>📈 SCALABILITY CONSIDERATIONS</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>SCALING DIMENSION 1: DATA VOLUME
+</span>
+  ┌──────────────┬────────────────────────────────────────────┐
+  │ Data Size    │ Hive Behavior                              │
+  ├──────────────┼────────────────────────────────────────────┤
+  │ &lt; 1 GB       │ Overkill — use pandas or SQLite            │
+  │ 1-100 GB     │ Good fit — single MR job handles it        │
+  │ 100GB - 10TB │ Sweet spot — partitioning essential (P25)  │
+  │ 10TB - 1PB   │ Works well with ORC/Parquet (Project 30)  │
+  │ &gt; 1 PB       │ Works but query times in hours             │
+  │              │ Tez engine strongly recommended             │
+  └──────────────┴────────────────────────────────────────────┘
+
+SCALING DIMENSION 2: QUERY COMPLEXITY
+
+  → Simple SELECT + WHERE: 1 MapReduce job
+  → GROUP BY + aggregation: 1 MapReduce job
+  → ORDER BY (global): 1 additional job (single reducer — bottleneck!)
+  → JOIN two tables: 1-2 jobs depending on join strategy
+  → Subquery + JOIN + GROUP BY + ORDER BY: 3-5 jobs chained
+  → Each additional job = ~30 seconds overhead + processing time
+
+SCALING DIMENSION 3: CONCURRENT USERS
+
+  → Hive with MapReduce: ~10-20 concurrent queries on 50-node cluster
+  → Each query consumes YARN containers (Project 22)
+  → Queue configuration (Project 22/39) prevents one query from starving others
+  → Hive with Tez: Better concurrency — container reuse
+  → For 100+ concurrent users: Hive + LLAP (Live Long And Process)
+
+SCALING DIMENSION 4: METASTORE
+
+  → Derby: single-user, embedded — DEVELOPMENT ONLY
+  → MySQL: 100+ concurrent connections — PRODUCTION
+  → Tables/partitions: Metastore handles millions of partitions
+  → BUT: too many partitions slow down query planning
+  → RULE: Keep partitions &lt; 100,000 per table</code></pre></div>
+<hr>
+<h2>🔍 INTERPRETABILITY CONSIDERATIONS</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>HOW TO UNDERSTAND WHAT HIVE IS DOING:
+</span>
+1. EXPLAIN COMMAND — see the execution plan
+   EXPLAIN SELECT category, SUM(amount) FROM orders GROUP BY category;
+   → Shows: number of stages, map/reduce operators, data flow
+
+2. EXPLAIN EXTENDED — detailed plan with file paths
+   EXPLAIN EXTENDED SELECT ...
+   → Shows: input paths, SerDe details, partition pruning
+
+3. HIVE LOGS
+   → Hive CLI: logs in /tmp/{user}/hive.log
+   → Shows: query parsing, optimization decisions, job submission
+   → SET hive.log.explain.output=true; for plan in logs
+
+4. YARN UI CORRELATION
+   → Each Hive query becomes one or more YARN applications
+   → Application name: "HIVE-{query_hash}" or similar
+   → Click in YARN UI to see mappers, reducers, counters
+
+5. DESCRIBE TABLE METADATA
+   DESCRIBE FORMATTED orders;
+   → Shows: columns, types, SerDe, location, partitions, stats
+   → Essential for debugging schema mismatches</code></pre></div>
+<hr>
+<h2>💻 COMPLETE WORKING CODE</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># PART A: INSTALL AND CONFIGURE HIVE</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 1: Download Hive</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">cd</span><span> /opt
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">wget</span><span> https://dlcdn.apache.org/hive/hive-3.1.3/apache-hive-3.1.3-bin.tar.gz
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">tar</span><span> -xzf apache-hive-3.1.3-bin.tar.gz
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">mv</span><span> apache-hive-3.1.3-bin hive
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 2: Set environment variables</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">cat</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">&gt;&gt;</span><span> ~/.bashrc </span><span class="token" style="color: rgb(57, 58, 52);">&lt;&lt;</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'EOF'
+</span><span class="token" style="color: rgb(163, 21, 21);">export HIVE_HOME=/opt/hive
+</span><span class="token" style="color: rgb(163, 21, 21);">export PATH=$PATH:$HIVE_HOME/bin
+</span><span class="token" style="color: rgb(163, 21, 21);">export HIVE_CONF_DIR=$HIVE_HOME/conf
+</span><span class="token" style="color: rgb(163, 21, 21);">EOF</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">source</span><span> ~/.bashrc
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 3: Configure Hive</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">cat</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">$HIVE_HOME</span><span>/conf/hive-site.xml </span><span class="token" style="color: rgb(57, 58, 52);">&lt;&lt;</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'XMLEOF'
+</span><span class="token" style="color: rgb(163, 21, 21);">&lt;configuration&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;!-- Metastore connection — using embedded Derby for development --&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;!-- Production: use MySQL/PostgreSQL (shown in comments below) --&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;property&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">        &lt;name&gt;javax.jdo.option.ConnectionURL&lt;/name&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">        &lt;value&gt;jdbc:derby:;databaseName=/opt/hive/metastore_db;create=true&lt;/value&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;/property&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;property&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">        &lt;name&gt;javax.jdo.option.ConnectionDriverName&lt;/name&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">        &lt;value&gt;org.apache.derby.jdbc.EmbeddedDriver&lt;/value&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;/property&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;!-- Hive warehouse directory in HDFS --&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;property&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">        &lt;name&gt;hive.metastore.warehouse.dir&lt;/name&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">        &lt;value&gt;/user/hive/warehouse&lt;/value&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;/property&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;!-- Enable fetch mode — avoid MapReduce for simple queries --&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;property&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">        &lt;name&gt;hive.fetch.task.conversion&lt;/name&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">        &lt;value&gt;more&lt;/value&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">        &lt;!-- "more" mode: SELECT, WHERE, LIMIT without MR --&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">        &lt;!-- "minimal" mode: only SELECT * LIMIT without MR --&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">        &lt;!-- "none": always use MapReduce (slowest) --&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;/property&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;!-- Show column names in output --&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;property&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">        &lt;name&gt;hive.cli.print.header&lt;/name&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">        &lt;value&gt;true&lt;/value&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;/property&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;!-- Show current database in prompt --&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;property&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">        &lt;name&gt;hive.cli.print.current.db&lt;/name&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">        &lt;value&gt;true&lt;/value&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;/property&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;!-- Execution engine: mr (MapReduce) or tez --&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;property&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">        &lt;name&gt;hive.execution.engine&lt;/name&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">        &lt;value&gt;mr&lt;/value&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">        &lt;!-- Use "tez" if Tez is installed — 5-10x faster --&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;/property&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;!-- ═══ PRODUCTION: MySQL Metastore (uncomment for production) ═══ --&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;!--
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;property&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">        &lt;name&gt;javax.jdo.option.ConnectionURL&lt;/name&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">        &lt;value&gt;jdbc:mysql://metastore-host:3306/hivemetastore?createDatabaseIfNotExist=true&lt;/value&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;/property&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;property&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">        &lt;name&gt;javax.jdo.option.ConnectionDriverName&lt;/name&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">        &lt;value&gt;com.mysql.cj.jdbc.Driver&lt;/value&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;/property&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;property&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">        &lt;name&gt;javax.jdo.option.ConnectionUserName&lt;/name&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">        &lt;value&gt;hive&lt;/value&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;/property&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;property&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">        &lt;name&gt;javax.jdo.option.ConnectionPassword&lt;/name&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">        &lt;value&gt;hive_password&lt;/value&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">    &lt;/property&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">    --&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">&lt;/configuration&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">XMLEOF</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 4: Initialize Metastore schema</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># This creates the Derby database with Hive's metadata tables</span><span>
+</span>schematool -dbType derby -initSchema
+
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 5: Create Hive warehouse directory in HDFS</span><span>
+</span>hdfs dfs -mkdir -p /user/hive/warehouse
+<span>hdfs dfs -chmod </span><span class="token" style="color: rgb(54, 172, 170);">777</span><span> /user/hive/warehouse
+</span>hdfs dfs -mkdir -p /tmp/hive
+<span>hdfs dfs -chmod </span><span class="token" style="color: rgb(54, 172, 170);">777</span><span> /tmp/hive
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 6: Verify Hive starts</span><span>
+</span><span>hive -e </span><span class="token" style="color: rgb(163, 21, 21);">"SELECT 1;"</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Expected: "1" — Hive is working</span></code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># PART B: GENERATE AND UPLOAD SAMPLE DATA</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(57, 58, 52);">cat</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span> generate_retail_data.py </span><span class="token" style="color: rgb(57, 58, 52);">&lt;&lt;</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'PYEOF'
+</span><span class="token" style="color: rgb(163, 21, 21);">import random
+</span><span class="token" style="color: rgb(163, 21, 21);">import sys
+</span><span class="token" style="color: rgb(163, 21, 21);">from datetime import datetime, timedelta
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">random.seed(42)
+</span><span class="token" style="color: rgb(163, 21, 21);">num_orders = int(sys.argv[1]) if len(sys.argv) &gt; 1 else 500000
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">categories = ["Electronics", "Clothing", "Home", "Sports",
+</span><span class="token" style="color: rgb(163, 21, 21);">              "Books", "Food", "Toys", "Beauty", "Auto", "Garden"]
+</span><span class="token" style="color: rgb(163, 21, 21);">payment_methods = ["Credit Card", "Debit Card", "PayPal", "Cash", "Crypto"]
+</span><span class="token" style="color: rgb(163, 21, 21);">regions = ["Northeast", "Southeast", "Midwest", "Southwest",
+</span><span class="token" style="color: rgb(163, 21, 21);">           "West", "Northwest", "Central"]
+</span><span class="token" style="color: rgb(163, 21, 21);">statuses = ["Completed", "Shipped", "Processing", "Returned", "Cancelled"]
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);"># Customer IDs: 50K unique customers
+</span><span class="token" style="color: rgb(163, 21, 21);">customer_ids = [f"CUST-{i:06d}" for i in range(1, 50001)]
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">start_date = datetime(2023, 1, 1)
+</span><span class="token" style="color: rgb(163, 21, 21);">date_range = 730  # 2 years
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">for i in range(num_orders):
+</span><span class="token" style="color: rgb(163, 21, 21);">    order_id = f"ORD-{i+1:08d}"
+</span><span class="token" style="color: rgb(163, 21, 21);">    customer_id = random.choice(customer_ids)
+</span><span class="token" style="color: rgb(163, 21, 21);">    days_offset = random.randint(0, date_range)
+</span><span class="token" style="color: rgb(163, 21, 21);">    order_date = (start_date + timedelta(days=days_offset)).strftime("%Y-%m-%d")
+</span><span class="token" style="color: rgb(163, 21, 21);">    category = random.choice(categories)
+</span><span class="token" style="color: rgb(163, 21, 21);">    amount = round(random.uniform(5.00, 2500.00), 2)
+</span><span class="token" style="color: rgb(163, 21, 21);">    quantity = random.randint(1, 10)
+</span><span class="token" style="color: rgb(163, 21, 21);">    payment = random.choice(payment_methods)
+</span><span class="token" style="color: rgb(163, 21, 21);">    region = random.choice(regions)
+</span><span class="token" style="color: rgb(163, 21, 21);">    status = random.choices(statuses, weights=[60, 20, 10, 7, 3], k=1)[0]
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">    print(f"{order_id}|{customer_id}|{order_date}|{category}|{amount}|{quantity}|{payment}|{region}|{status}")
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">PYEOF</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Generate customer dimension data</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">cat</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span> generate_customers.py </span><span class="token" style="color: rgb(57, 58, 52);">&lt;&lt;</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'PYEOF'
+</span><span class="token" style="color: rgb(163, 21, 21);">import random
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">random.seed(123)
+</span><span class="token" style="color: rgb(163, 21, 21);">tiers = ["Bronze", "Silver", "Gold", "Platinum"]
+</span><span class="token" style="color: rgb(163, 21, 21);">ages = list(range(18, 80))
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">for i in range(1, 50001):
+</span><span class="token" style="color: rgb(163, 21, 21);">    cust_id = f"CUST-{i:06d}"
+</span><span class="token" style="color: rgb(163, 21, 21);">    name = f"Customer_{i}"
+</span><span class="token" style="color: rgb(163, 21, 21);">    age = random.choice(ages)
+</span><span class="token" style="color: rgb(163, 21, 21);">    tier = random.choices(tiers, weights=[40, 30, 20, 10], k=1)[0]
+</span><span class="token" style="color: rgb(163, 21, 21);">    signup_year = random.randint(2015, 2024)
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">    print(f"{cust_id}|{name}|{age}|{tier}|{signup_year}")
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">PYEOF</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Generate data</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"=== Generating 500K order records ==="</span><span>
+</span><span>python3 generate_retail_data.py </span><span class="token" style="color: rgb(54, 172, 170);">500000</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span> /tmp/orders.txt
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">wc</span><span> -l /tmp/orders.txt
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">head</span><span> -5 /tmp/orders.txt
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"=== Generating 50K customer records ==="</span><span>
+</span><span>python3 generate_customers.py </span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span> /tmp/customers.txt
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">wc</span><span> -l /tmp/customers.txt
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">head</span><span> -5 /tmp/customers.txt
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Upload to HDFS</span><span>
+</span>hdfs dfs -mkdir -p /data/retail/orders
+hdfs dfs -mkdir -p /data/retail/customers
+hdfs dfs -put /tmp/orders.txt /data/retail/orders/
+hdfs dfs -put /tmp/customers.txt /data/retail/customers/
+
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"=== HDFS Data ==="</span><span>
+</span>hdfs dfs -ls -h /data/retail/orders/
+hdfs dfs -ls -h /data/retail/customers/</code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- ══════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- PART C: HIVE TABLE CREATION AND QUERIES</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- Save as: retail_analytics.hql</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- Run with: hive -f retail_analytics.hql</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- ══════════════════════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- ═══════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- SECTION 1: CREATE DATABASE</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- ═══════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 0, 255);">CREATE</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">DATABASE</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">IF</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">NOT</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">EXISTS</span><span> retail
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">COMMENT</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'Retail analytics database — order and customer data'</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 0, 255);">USE</span><span> retail</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- ═══════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- SECTION 2: CREATE EXTERNAL TABLE — ORDERS</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- EXTERNAL = Hive does NOT own the data</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- Data already exists in HDFS from our pipeline</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- ═══════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 0, 255);">CREATE</span><span> EXTERNAL </span><span class="token" style="color: rgb(0, 0, 255);">TABLE</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">IF</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">NOT</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">EXISTS</span><span> orders </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>
+</span><span>    order_id        STRING      </span><span class="token" style="color: rgb(0, 0, 255);">COMMENT</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'Unique order identifier'</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    customer_id     STRING      </span><span class="token" style="color: rgb(0, 0, 255);">COMMENT</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'Customer who placed order'</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    order_date      STRING      </span><span class="token" style="color: rgb(0, 0, 255);">COMMENT</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'Date in YYYY-MM-DD format'</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    category        STRING      </span><span class="token" style="color: rgb(0, 0, 255);">COMMENT</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'Product category'</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    amount          </span><span class="token" style="color: rgb(0, 0, 255);">DOUBLE</span><span>      </span><span class="token" style="color: rgb(0, 0, 255);">COMMENT</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'Order amount in USD'</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    quantity        </span><span class="token" style="color: rgb(0, 0, 255);">INT</span><span>         </span><span class="token" style="color: rgb(0, 0, 255);">COMMENT</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'Number of items'</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    payment_method  STRING      </span><span class="token" style="color: rgb(0, 0, 255);">COMMENT</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'Payment method used'</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    region          STRING      </span><span class="token" style="color: rgb(0, 0, 255);">COMMENT</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'Geographic region'</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">status</span><span>          STRING      </span><span class="token" style="color: rgb(0, 0, 255);">COMMENT</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'Order status'</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">COMMENT</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'Raw order events from retail platform'</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">ROW</span><span> FORMAT DELIMITED
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">FIELDS</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">TERMINATED</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">BY</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'|'</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">LINES</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">TERMINATED</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">BY</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'\n'</span><span>
+</span><span>STORED </span><span class="token" style="color: rgb(0, 0, 255);">AS</span><span> TEXTFILE
+</span><span>LOCATION </span><span class="token" style="color: rgb(163, 21, 21);">'/data/retail/orders/'</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- Verify table created</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">DESCRIBE</span><span> FORMATTED orders</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- Quick data check (uses fetch mode — no MapReduce!)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">SELECT</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">*</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">FROM</span><span> orders </span><span class="token" style="color: rgb(0, 0, 255);">LIMIT</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">5</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- ═══════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- SECTION 3: CREATE EXTERNAL TABLE — CUSTOMERS</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- ═══════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 0, 255);">CREATE</span><span> EXTERNAL </span><span class="token" style="color: rgb(0, 0, 255);">TABLE</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">IF</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">NOT</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">EXISTS</span><span> customers </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>
+</span><span>    customer_id     STRING      </span><span class="token" style="color: rgb(0, 0, 255);">COMMENT</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'Unique customer identifier'</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    customer_name   STRING      </span><span class="token" style="color: rgb(0, 0, 255);">COMMENT</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'Customer display name'</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    age             </span><span class="token" style="color: rgb(0, 0, 255);">INT</span><span>         </span><span class="token" style="color: rgb(0, 0, 255);">COMMENT</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'Customer age'</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    tier            STRING      </span><span class="token" style="color: rgb(0, 0, 255);">COMMENT</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'Loyalty tier: Bronze/Silver/Gold/Platinum'</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    signup_year     </span><span class="token" style="color: rgb(0, 0, 255);">INT</span><span>         </span><span class="token" style="color: rgb(0, 0, 255);">COMMENT</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'Year customer signed up'</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">COMMENT</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'Customer dimension table'</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">ROW</span><span> FORMAT DELIMITED
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">FIELDS</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">TERMINATED</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">BY</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'|'</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">LINES</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">TERMINATED</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">BY</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'\n'</span><span>
+</span><span>STORED </span><span class="token" style="color: rgb(0, 0, 255);">AS</span><span> TEXTFILE
+</span><span>LOCATION </span><span class="token" style="color: rgb(163, 21, 21);">'/data/retail/customers/'</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 0, 255);">SELECT</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">*</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">FROM</span><span> customers </span><span class="token" style="color: rgb(0, 0, 255);">LIMIT</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">5</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- ═══════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- SECTION 4: BASIC QUERIES</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- Each compiles to MapReduce job(s) automatically</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- ═══════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- Query 1: Total revenue per category</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- EQUIVALENT MapReduce: Projects 4-6 pattern</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- Mapper: parse line, emit (category, amount)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- Combiner: partial SUM</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- Reducer: final SUM</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">SELECT</span><span>
+</span><span>    category</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">COUNT</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">*</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> order_count</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">ROUND</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">SUM</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>amount</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">2</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> total_revenue</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">ROUND</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">AVG</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>amount</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">2</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> avg_order_value
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">FROM</span><span> orders
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">WHERE</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">status</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'Completed'</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">GROUP</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">BY</span><span> category
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">ORDER</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">BY</span><span> total_revenue </span><span class="token" style="color: rgb(0, 0, 255);">DESC</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- Query 2: Monthly revenue trend</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- Shows time-series aggregation</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">SELECT</span><span>
+</span><span>    SUBSTR</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>order_date</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">7</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">month</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">COUNT</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">*</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> orders</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">ROUND</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">SUM</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>amount</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">2</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> revenue
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">FROM</span><span> orders
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">WHERE</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">status</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">IN</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">'Completed'</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'Shipped'</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">GROUP</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">BY</span><span> SUBSTR</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>order_date</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">7</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">ORDER</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">BY</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">month</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- Query 3: Top 10 customers by spending</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- EQUIVALENT MapReduce: GROUP BY + sort (Projects 6, 18)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">SELECT</span><span>
+</span><span>    customer_id</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">COUNT</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">*</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> total_orders</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">ROUND</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">SUM</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>amount</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">2</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> total_spent</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">ROUND</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">AVG</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>amount</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">2</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> avg_order
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">FROM</span><span> orders
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">WHERE</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">status</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'Completed'</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">GROUP</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">BY</span><span> customer_id
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">ORDER</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">BY</span><span> total_spent </span><span class="token" style="color: rgb(0, 0, 255);">DESC</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">LIMIT</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">10</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- ═══════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- SECTION 5: JOIN QUERIES</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- EQUIVALENT: Reduce-Side Join (Project 17)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- Hive automatically chooses join strategy</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- ═══════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- Query 4: Revenue by customer tier</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- JOIN orders with customers, then aggregate</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">SELECT</span><span>
+</span><span>    c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>tier</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">COUNT</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">*</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> order_count</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">COUNT</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(0, 0, 255);">DISTINCT</span><span> o</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>customer_id</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> unique_customers</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">ROUND</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">SUM</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>o</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>amount</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">2</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> total_revenue</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">ROUND</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">AVG</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>o</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>amount</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">2</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> avg_order_value
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">FROM</span><span> orders o
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">JOIN</span><span> customers c </span><span class="token" style="color: rgb(0, 0, 255);">ON</span><span> o</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>customer_id </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>customer_id
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">WHERE</span><span> o</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(0, 0, 255);">status</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'Completed'</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">GROUP</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">BY</span><span> c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>tier
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">ORDER</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">BY</span><span> total_revenue </span><span class="token" style="color: rgb(0, 0, 255);">DESC</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- Query 5: High-value customers with their details</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- JOIN + filter + aggregation</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">SELECT</span><span>
+</span><span>    c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>customer_id</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>customer_name</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>tier</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>age</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">COUNT</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">*</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> total_orders</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">ROUND</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">SUM</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>o</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>amount</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">2</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> lifetime_value
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">FROM</span><span> orders o
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">JOIN</span><span> customers c </span><span class="token" style="color: rgb(0, 0, 255);">ON</span><span> o</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>customer_id </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>customer_id
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">WHERE</span><span> o</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(0, 0, 255);">status</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'Completed'</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">GROUP</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">BY</span><span> c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>customer_id</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>customer_name</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>tier</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>age
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">HAVING</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">SUM</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>o</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>amount</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">10000</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">ORDER</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">BY</span><span> lifetime_value </span><span class="token" style="color: rgb(0, 0, 255);">DESC</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">LIMIT</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">20</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- ═══════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- SECTION 6: SUBQUERIES AND COMPLEX ANALYTICS</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- ═══════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- Query 6: Category performance compared to average</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">SELECT</span><span>
+</span><span>    category</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    total_revenue</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    avg_revenue</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">ROUND</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>total_revenue </span><span class="token" style="color: rgb(57, 58, 52);">-</span><span> avg_revenue</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">2</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> above_below_avg</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">CASE</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">WHEN</span><span> total_revenue </span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span> avg_revenue </span><span class="token" style="color: rgb(57, 58, 52);">*</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">1.2</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">THEN</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'HIGH PERFORMER'</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">WHEN</span><span> total_revenue </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span> avg_revenue </span><span class="token" style="color: rgb(57, 58, 52);">*</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">0.8</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">THEN</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'UNDERPERFORMER'</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">ELSE</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'AVERAGE'</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">END</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> performance_label
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">FROM</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">SELECT</span><span>
+</span><span>        category</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">ROUND</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">SUM</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>amount</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">2</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> total_revenue</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">ROUND</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">AVG</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">SUM</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>amount</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">OVER</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">2</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> avg_revenue
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">FROM</span><span> orders
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">WHERE</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">status</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'Completed'</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">GROUP</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">BY</span><span> category
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> category_stats
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">ORDER</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">BY</span><span> total_revenue </span><span class="token" style="color: rgb(0, 0, 255);">DESC</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- Query 7: Customer retention — orders per signup year cohort</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">SELECT</span><span>
+</span><span>    c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>signup_year </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> cohort</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">COUNT</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(0, 0, 255);">DISTINCT</span><span> c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>customer_id</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> customers</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">COUNT</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>o</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>order_id</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> total_orders</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">ROUND</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">COUNT</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>o</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>order_id</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">*</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">1.0</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">/</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">COUNT</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(0, 0, 255);">DISTINCT</span><span> c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>customer_id</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> orders_per_customer</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">ROUND</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">SUM</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>o</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>amount</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">2</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> total_revenue
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">FROM</span><span> customers c
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">LEFT</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">JOIN</span><span> orders o </span><span class="token" style="color: rgb(0, 0, 255);">ON</span><span> c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>customer_id </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> o</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>customer_id
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">AND</span><span> o</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(0, 0, 255);">status</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'Completed'</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">GROUP</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">BY</span><span> c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>signup_year
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">ORDER</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">BY</span><span> c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>signup_year
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- ═══════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- SECTION 7: CREATE TABLE AS SELECT (CTAS)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- Creates a MANAGED table from query results</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- Equivalent to Job Chaining (Project 21)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- ═══════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- Create a summary table for downstream use</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">CREATE</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">TABLE</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">IF</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">NOT</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">EXISTS</span><span> customer_summary
+</span><span>STORED </span><span class="token" style="color: rgb(0, 0, 255);">AS</span><span> TEXTFILE
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">AS</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">SELECT</span><span>
+</span><span>    o</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>customer_id</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>customer_name</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>tier</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>age</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">COUNT</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">*</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> total_orders</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">ROUND</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">SUM</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>o</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>amount</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">2</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> lifetime_value</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">MIN</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>o</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>order_date</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> first_order</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">MAX</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>o</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>order_date</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> last_order</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">COUNT</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(0, 0, 255);">DISTINCT</span><span> o</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>category</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> categories_purchased
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">FROM</span><span> orders o
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">JOIN</span><span> customers c </span><span class="token" style="color: rgb(0, 0, 255);">ON</span><span> o</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>customer_id </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>customer_id
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">WHERE</span><span> o</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(0, 0, 255);">status</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'Completed'</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">GROUP</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">BY</span><span> o</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>customer_id</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>customer_name</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>tier</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>age
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- Query the summary table (fast — already aggregated)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">SELECT</span><span> tier</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">COUNT</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">*</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> customers</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>       </span><span class="token" style="color: rgb(57, 58, 52);">ROUND</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">AVG</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>lifetime_value</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">2</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> avg_ltv
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">FROM</span><span> customer_summary
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">GROUP</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">BY</span><span> tier
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">ORDER</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">BY</span><span> avg_ltv </span><span class="token" style="color: rgb(0, 0, 255);">DESC</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- ═══════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- SECTION 8: EXPLAIN — Understanding Execution Plans</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- ═══════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- See what MapReduce jobs Hive generates</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">EXPLAIN</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">SELECT</span><span> category</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">SUM</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>amount</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> revenue
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">FROM</span><span> orders
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">WHERE</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">status</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'Completed'</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">GROUP</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">BY</span><span> category
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">ORDER</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">BY</span><span> revenue </span><span class="token" style="color: rgb(0, 0, 255);">DESC</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">-- See detailed plan with physical details</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">EXPLAIN</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">EXTENDED</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">SELECT</span><span> c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>tier</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">SUM</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>o</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>amount</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> revenue
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">FROM</span><span> orders o
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">JOIN</span><span> customers c </span><span class="token" style="color: rgb(0, 0, 255);">ON</span><span> o</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>customer_id </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>customer_id
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">GROUP</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">BY</span><span> c</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>tier
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">;</span></code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># PART D: RUN THE HIVE QUERIES</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Method 1: Run the full script</span><span>
+</span>hive -f retail_analytics.hql
+
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Method 2: Run individual queries interactively</span><span>
+</span>hive
+
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Method 3: Run single query from command line</span><span>
+</span><span>hive -e </span><span class="token" style="color: rgb(163, 21, 21);">"USE retail; SELECT category, COUNT(*) FROM orders GROUP BY category;"</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Method 4: Run with variable substitution</span><span>
+</span><span>hive -e </span><span class="token" style="color: rgb(163, 21, 21);">"USE retail; SELECT * FROM orders WHERE order_date &gt;= '\</span><span class="token" style="color: rgb(54, 172, 170);">${hivevar</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span class="token" style="color: rgb(54, 172, 170);">start_date}</span><span class="token" style="color: rgb(163, 21, 21);">' LIMIT 10;"</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">\</span><span>
+</span><span>     --hivevar </span><span class="token assign-left" style="color: rgb(54, 172, 170);">start_date</span><span class="token" style="color: rgb(57, 58, 52);">=</span><span class="token" style="color: rgb(54, 172, 170);">2024</span><span>-06-01</span></code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># PART E: HIVE OPTIMIZATION SETTINGS</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(57, 58, 52);">cat</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span> hive_optimizations.hql </span><span class="token" style="color: rgb(57, 58, 52);">&lt;&lt;</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'HQLEOF'
+</span><span class="token" style="color: rgb(163, 21, 21);">-- ═══════════════════════════════════════════════
+</span><span class="token" style="color: rgb(163, 21, 21);">-- OPTIMIZATION SETTINGS FOR PRODUCTION USE
+</span><span class="token" style="color: rgb(163, 21, 21);">-- Run these at the start of each Hive session
+</span><span class="token" style="color: rgb(163, 21, 21);">-- ═══════════════════════════════════════════════
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">-- 1. Fetch mode: avoid MapReduce for simple queries
+</span><span class="token" style="color: rgb(163, 21, 21);">SET hive.fetch.task.conversion=more;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">-- 2. Map-side join: automatically use Map-Side Join (Project 16)
+</span><span class="token" style="color: rgb(163, 21, 21);">--    when one table is small enough to fit in memory
+</span><span class="token" style="color: rgb(163, 21, 21);">SET hive.auto.convert.join=true;
+</span><span class="token" style="color: rgb(163, 21, 21);">SET hive.mapjoin.smalltable.filesize=25000000;
+</span><span class="token" style="color: rgb(163, 21, 21);">-- Tables &lt; 25MB automatically broadcast to all mappers
+</span><span class="token" style="color: rgb(163, 21, 21);">-- Eliminates reduce-side shuffle for join
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">-- 3. Parallel execution: run independent stages simultaneously
+</span><span class="token" style="color: rgb(163, 21, 21);">SET hive.exec.parallel=true;
+</span><span class="token" style="color: rgb(163, 21, 21);">SET hive.exec.parallel.thread.number=8;
+</span><span class="token" style="color: rgb(163, 21, 21);">-- If query has independent stages, run them in parallel
+</span><span class="token" style="color: rgb(163, 21, 21);">-- Similar to JobControl parallelism (Project 21)
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">-- 4. Vectorized execution: process 1024 rows at a time
+</span><span class="token" style="color: rgb(163, 21, 21);">SET hive.vectorized.execution.enabled=true;
+</span><span class="token" style="color: rgb(163, 21, 21);">SET hive.vectorized.execution.reduce.enabled=true;
+</span><span class="token" style="color: rgb(163, 21, 21);">-- Instead of row-by-row: processes batches of 1024 rows
+</span><span class="token" style="color: rgb(163, 21, 21);">-- 2-10x speedup for ORC/Parquet (Project 30)
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">-- 5. Cost-based optimizer: choose optimal join order
+</span><span class="token" style="color: rgb(163, 21, 21);">SET hive.cbo.enable=true;
+</span><span class="token" style="color: rgb(163, 21, 21);">SET hive.compute.query.using.stats=true;
+</span><span class="token" style="color: rgb(163, 21, 21);">SET hive.stats.fetch.column.stats=true;
+</span><span class="token" style="color: rgb(163, 21, 21);">-- Requires: ANALYZE TABLE orders COMPUTE STATISTICS;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">-- 6. Compression for intermediate data
+</span><span class="token" style="color: rgb(163, 21, 21);">SET hive.exec.compress.intermediate=true;
+</span><span class="token" style="color: rgb(163, 21, 21);">SET hive.intermediate.compression.codec=org.apache.hadoop.io.compress.SnappyCodec;
+</span><span class="token" style="color: rgb(163, 21, 21);">-- Reduces shuffle data volume (Project 14 concept)
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">-- 7. Compression for final output
+</span><span class="token" style="color: rgb(163, 21, 21);">SET hive.exec.compress.output=true;
+</span><span class="token" style="color: rgb(163, 21, 21);">SET mapreduce.output.fileoutputformat.compress.codec=org.apache.hadoop.io.compress.SnappyCodec;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">-- 8. Memory settings (Project 23 concepts applied to Hive)
+</span><span class="token" style="color: rgb(163, 21, 21);">SET mapreduce.map.memory.mb=2048;
+</span><span class="token" style="color: rgb(163, 21, 21);">SET mapreduce.map.java.opts=-Xmx1536m;
+</span><span class="token" style="color: rgb(163, 21, 21);">SET mapreduce.reduce.memory.mb=4096;
+</span><span class="token" style="color: rgb(163, 21, 21);">SET mapreduce.reduce.java.opts=-Xmx3072m;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">-- 9. Dynamic partitioning (preview for Project 25)
+</span><span class="token" style="color: rgb(163, 21, 21);">SET hive.exec.dynamic.partition=true;
+</span><span class="token" style="color: rgb(163, 21, 21);">SET hive.exec.dynamic.partition.mode=nonstrict;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">HQLEOF</span><span>
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"Load optimizations: hive -i hive_optimizations.hql"</span></code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># PART F: COMPREHENSIVE VERIFICATION</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(57, 58, 52);">cat</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span> verify_hive.sh </span><span class="token" style="color: rgb(57, 58, 52);">&lt;&lt;</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'SHEOF'
+</span><span class="token" style="color: rgb(163, 21, 21);">#!/bin/bash
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">echo "═══════════════════════════════════════════════════════════════"
+</span><span class="token" style="color: rgb(163, 21, 21);">echo "HIVE INSTALLATION AND DATA VERIFICATION"
+</span><span class="token" style="color: rgb(163, 21, 21);">echo "═══════════════════════════════════════════════════════════════"
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);"># Check 1: Hive executable
+</span><span class="token" style="color: rgb(163, 21, 21);">echo ""
+</span><span class="token" style="color: rgb(163, 21, 21);">echo "--- CHECK 1: Hive Installation ---"
+</span><span class="token" style="color: rgb(163, 21, 21);">hive --version 2&gt;/dev/null | head -1
+</span><span class="token" style="color: rgb(163, 21, 21);">if [ $? -eq 0 ]; then
+</span><span class="token" style="color: rgb(163, 21, 21);">    echo "  ✅ Hive installed"
+</span><span class="token" style="color: rgb(163, 21, 21);">else
+</span><span class="token" style="color: rgb(163, 21, 21);">    echo "  ❌ Hive not found"
+</span><span class="token" style="color: rgb(163, 21, 21);">    exit 1
+</span><span class="token" style="color: rgb(163, 21, 21);">fi
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);"># Check 2: Database and tables exist
+</span><span class="token" style="color: rgb(163, 21, 21);">echo ""
+</span><span class="token" style="color: rgb(163, 21, 21);">echo "--- CHECK 2: Database and Tables ---"
+</span><span class="token" style="color: rgb(163, 21, 21);">TABLES=$(hive -S -e "USE retail; SHOW TABLES;" 2&gt;/dev/null)
+</span><span class="token" style="color: rgb(163, 21, 21);">echo "  Tables in 'retail' database:"
+</span><span class="token" style="color: rgb(163, 21, 21);">echo "$TABLES" | while read table; do
+</span><span class="token" style="color: rgb(163, 21, 21);">    echo "    ✅ $table"
+</span><span class="token" style="color: rgb(163, 21, 21);">done
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);"># Check 3: Data accessible
+</span><span class="token" style="color: rgb(163, 21, 21);">echo ""
+</span><span class="token" style="color: rgb(163, 21, 21);">echo "--- CHECK 3: Data Accessibility ---"
+</span><span class="token" style="color: rgb(163, 21, 21);">ORDER_COUNT=$(hive -S -e "USE retail; SELECT COUNT(*) FROM orders;" 2&gt;/dev/null)
+</span><span class="token" style="color: rgb(163, 21, 21);">CUST_COUNT=$(hive -S -e "USE retail; SELECT COUNT(*) FROM customers;" 2&gt;/dev/null)
+</span><span class="token" style="color: rgb(163, 21, 21);">echo "  Orders:    $ORDER_COUNT records"
+</span><span class="token" style="color: rgb(163, 21, 21);">echo "  Customers: $CUST_COUNT records"
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);"># Check 4: Schema correctness (no all-NULLs)
+</span><span class="token" style="color: rgb(163, 21, 21);">echo ""
+</span><span class="token" style="color: rgb(163, 21, 21);">echo "--- CHECK 4: Schema Correctness ---"
+</span><span class="token" style="color: rgb(163, 21, 21);">SAMPLE=$(hive -S -e "USE retail; SELECT order_id, category, amount FROM orders LIMIT 3;" 2&gt;/dev/null)
+</span><span class="token" style="color: rgb(163, 21, 21);">echo "  Sample data:"
+</span><span class="token" style="color: rgb(163, 21, 21);">echo "$SAMPLE" | while read line; do
+</span><span class="token" style="color: rgb(163, 21, 21);">    echo "    $line"
+</span><span class="token" style="color: rgb(163, 21, 21);">done
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">NULL_CHECK=$(hive -S -e "USE retail; SELECT COUNT(*) FROM orders WHERE order_id IS NULL;" 2&gt;/dev/null)
+</span><span class="token" style="color: rgb(163, 21, 21);">echo "  NULL order_id count: $NULL_CHECK"
+</span><span class="token" style="color: rgb(163, 21, 21);">if [ "$NULL_CHECK" = "0" ]; then
+</span><span class="token" style="color: rgb(163, 21, 21);">    echo "  ✅ No NULL primary keys — schema matches data"
+</span><span class="token" style="color: rgb(163, 21, 21);">else
+</span><span class="token" style="color: rgb(163, 21, 21);">    echo "  ⚠️  NULL values detected — check delimiter/schema"
+</span><span class="token" style="color: rgb(163, 21, 21);">fi
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);"># Check 5: Query execution
+</span><span class="token" style="color: rgb(163, 21, 21);">echo ""
+</span><span class="token" style="color: rgb(163, 21, 21);">echo "--- CHECK 5: Query Execution ---"
+</span><span class="token" style="color: rgb(163, 21, 21);">echo "  Running: SELECT category, COUNT(*) FROM orders GROUP BY category"
+</span><span class="token" style="color: rgb(163, 21, 21);">RESULT=$(hive -S -e "
+</span><span class="token" style="color: rgb(163, 21, 21);">    USE retail;
+</span><span class="token" style="color: rgb(163, 21, 21);">    SET hive.fetch.task.conversion=more;
+</span><span class="token" style="color: rgb(163, 21, 21);">    SELECT category, COUNT(*) as cnt
+</span><span class="token" style="color: rgb(163, 21, 21);">    FROM orders
+</span><span class="token" style="color: rgb(163, 21, 21);">    GROUP BY category
+</span><span class="token" style="color: rgb(163, 21, 21);">    ORDER BY cnt DESC
+</span><span class="token" style="color: rgb(163, 21, 21);">    LIMIT 5;" 2&gt;/dev/null)
+</span><span class="token" style="color: rgb(163, 21, 21);">echo "  Top 5 categories:"
+</span><span class="token" style="color: rgb(163, 21, 21);">echo "$RESULT" | while read line; do
+</span><span class="token" style="color: rgb(163, 21, 21);">    echo "    $line"
+</span><span class="token" style="color: rgb(163, 21, 21);">done
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);"># Check 6: Join works
+</span><span class="token" style="color: rgb(163, 21, 21);">echo ""
+</span><span class="token" style="color: rgb(163, 21, 21);">echo "--- CHECK 6: Join Execution ---"
+</span><span class="token" style="color: rgb(163, 21, 21);">JOIN_RESULT=$(hive -S -e "
+</span><span class="token" style="color: rgb(163, 21, 21);">    USE retail;
+</span><span class="token" style="color: rgb(163, 21, 21);">    SELECT c.tier, COUNT(*) as orders
+</span><span class="token" style="color: rgb(163, 21, 21);">    FROM orders o
+</span><span class="token" style="color: rgb(163, 21, 21);">    JOIN customers c ON o.customer_id = c.customer_id
+</span><span class="token" style="color: rgb(163, 21, 21);">    GROUP BY c.tier
+</span><span class="token" style="color: rgb(163, 21, 21);">    ORDER BY orders DESC;" 2&gt;/dev/null)
+</span><span class="token" style="color: rgb(163, 21, 21);">echo "  Orders by customer tier:"
+</span><span class="token" style="color: rgb(163, 21, 21);">echo "$JOIN_RESULT" | while read line; do
+</span><span class="token" style="color: rgb(163, 21, 21);">    echo "    $line"
+</span><span class="token" style="color: rgb(163, 21, 21);">done
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);"># Check 7: EXPLAIN works
+</span><span class="token" style="color: rgb(163, 21, 21);">echo ""
+</span><span class="token" style="color: rgb(163, 21, 21);">echo "--- CHECK 7: EXPLAIN Output ---"
+</span><span class="token" style="color: rgb(163, 21, 21);">PLAN_STAGES=$(hive -S -e "
+</span><span class="token" style="color: rgb(163, 21, 21);">    USE retail;
+</span><span class="token" style="color: rgb(163, 21, 21);">    EXPLAIN SELECT category, SUM(amount) FROM orders GROUP BY category;" 2&gt;/dev/null | \
+</span><span class="token" style="color: rgb(163, 21, 21);">    grep -c "Stage-")
+</span><span class="token" style="color: rgb(163, 21, 21);">echo "  Execution plan stages: $PLAN_STAGES"
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">echo ""
+</span><span class="token" style="color: rgb(163, 21, 21);">echo "═══════════════════════════════════════════════════════════════"
+</span><span class="token" style="color: rgb(163, 21, 21);">echo "✅ HIVE VERIFICATION COMPLETE"
+</span><span class="token" style="color: rgb(163, 21, 21);">echo "═══════════════════════════════════════════════════════════════"
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">SHEOF</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(57, 58, 52);">chmod</span><span> +x verify_hive.sh
+</span>./verify_hive.sh</code></pre></div>
+<hr>
+
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># PART G: HIVE vs MapReduce COMPARISON</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Shows the same analysis implemented both ways</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span>
+<span>comparison </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">"""
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">═══════════════════════════════════════════════════════════════
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">HIVE vs RAW MapReduce — SIDE BY SIDE COMPARISON
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">═══════════════════════════════════════════════════════════════
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">TASK: Total revenue per category for completed orders
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">──────────────────────────────────────────────────────────────
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">RAW MapReduce (Projects 4-9 pattern):
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">──────────────────────────────────────────────────────────────
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  // Mapper.java (40 lines)
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  public class CategoryMapper extends Mapper&lt;LongWritable, Text,
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">                                             Text, DoubleWritable&gt; {
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">      private Text categoryKey = new Text();
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">      private DoubleWritable amountValue = new DoubleWritable();
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">      
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">      protected void map(LongWritable offset, Text line, Context ctx) {
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">          String[] fields = line.toString().split("\\\\|");
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">          if (fields.length &lt; 9) return;
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">          String status = fields[8].trim();
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">          if (!"Completed".equals(status)) return;
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">          String category = fields[3].trim();
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">          double amount = Double.parseDouble(fields[4].trim());
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">          categoryKey.set(category);
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">          amountValue.set(amount);
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">          ctx.write(categoryKey, amountValue);
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">      }
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  }
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  // Combiner.java (20 lines)
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  public class CategoryCombiner extends Reducer&lt;Text, DoubleWritable,
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">                                                Text, DoubleWritable&gt; {
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">      protected void reduce(Text key, Iterable&lt;DoubleWritable&gt; values,
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">                            Context ctx) {
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">          double sum = 0;
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">          for (DoubleWritable val : values) sum += val.get();
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">          ctx.write(key, new DoubleWritable(sum));
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">      }
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  }
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  // Reducer.java (25 lines)
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  public class CategoryReducer extends Reducer&lt;Text, DoubleWritable,
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">                                               Text, DoubleWritable&gt; {
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">      protected void reduce(Text key, Iterable&lt;DoubleWritable&gt; values,
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">                            Context ctx) {
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">          double sum = 0;
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">          for (DoubleWritable val : values) sum += val.get();
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">          ctx.write(key, new DoubleWritable(sum));
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">      }
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  }
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  // Driver.java (40 lines)
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  public class CategoryRevenueDriver extends Configured implements Tool {
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">      public int run(String[] args) throws Exception {
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">          Job job = Job.getInstance(getConf(), "Category Revenue");
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">          job.setJarByClass(CategoryRevenueDriver.class);
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">          job.setMapperClass(CategoryMapper.class);
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">          job.setCombinerClass(CategoryCombiner.class);
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">          job.setReducerClass(CategoryReducer.class);
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">          job.setOutputKeyClass(Text.class);
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">          job.setOutputValueClass(DoubleWritable.class);
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">          FileInputFormat.addInputPath(job, new Path(args[0]));
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">          FileOutputFormat.setOutputPath(job, new Path(args[1]));
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">          return job.waitForCompletion(true) ? 0 : 1;
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">      }
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  }
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  // Build and run:
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  javac -classpath $(hadoop classpath) -d build *.java
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  jar -cvf category-revenue.jar -C build/ .
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  hadoop jar category-revenue.jar CategoryRevenueDriver /data/orders /output/rev
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  TOTAL: ~125 lines of Java + compile + JAR + submit
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  DEVELOPMENT TIME: 2-4 hours
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">──────────────────────────────────────────────────────────────
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">HIVE (THIS project):
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">──────────────────────────────────────────────────────────────
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  SELECT category, ROUND(SUM(amount), 2) as revenue
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  FROM orders
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  WHERE status = 'Completed'
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  GROUP BY category
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  ORDER BY revenue DESC;
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  TOTAL: 5 lines of SQL
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  DEVELOPMENT TIME: 2 minutes
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">──────────────────────────────────────────────────────────────
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">COMPARISON MATRIX:
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">──────────────────────────────────────────────────────────────
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  ┌─────────────────────┬──────────────────┬──────────────────┐
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  │ Metric              │ Raw MapReduce    │ Hive             │
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  ├─────────────────────┼──────────────────┼──────────────────┤
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  │ Lines of code       │ ~125 (Java)      │ 5 (SQL)          │
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  │ Development time    │ 2-4 hours        │ 2 minutes        │
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  │ Skill required      │ Java + Hadoop API│ SQL              │
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  │ Compile step        │ Yes (javac+jar)  │ No               │
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  │ Debug cycle         │ 30+ min per iter │ 2 min per iter   │
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  │ Flexibility         │ Unlimited        │ SQL-expressible  │
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  │ Runtime performance │ Optimal (tuned)  │ Near-optimal     │
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  │ Custom logic        │ Any algorithm    │ UDFs needed      │
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  │ Team accessibility  │ Java developers  │ Any SQL user     │
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  │ Maintenance         │ High (code)      │ Low (query)      │
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  └─────────────────────┴──────────────────┴──────────────────┘
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">──────────────────────────────────────────────────────────────
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">TASK 2: Join orders with customers, aggregate by tier
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">──────────────────────────────────────────────────────────────
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  RAW MapReduce:
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    → Reduce-Side Join (Project 17): ~200 lines
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    → Custom Writable for tagged records
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    → Custom Partitioner
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    → MultipleInputs configuration
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    → Second job for aggregation
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    → Job Chaining (Project 21) to connect them
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    → TOTAL: ~350 lines across 6-8 Java files
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    → DEVELOPMENT TIME: 1-2 days
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  HIVE:
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    SELECT c.tier, COUNT(*) as orders, SUM(o.amount) as revenue
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    FROM orders o
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    JOIN customers c ON o.customer_id = c.customer_id
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    WHERE o.status = 'Completed'
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    GROUP BY c.tier
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    ORDER BY revenue DESC;
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    → TOTAL: 6 lines of SQL
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    → DEVELOPMENT TIME: 3 minutes
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">──────────────────────────────────────────────────────────────
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">WHEN TO USE WHICH:
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">──────────────────────────────────────────────────────────────
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  USE HIVE WHEN:
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    ✅ Analysis expressible in SQL (80% of cases)
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    ✅ Team includes SQL-skilled analysts
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    ✅ Rapid iteration on queries needed
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    ✅ Standard patterns: filter, join, group, aggregate
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    ✅ Data warehouse / reporting use cases
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  USE RAW MapReduce WHEN:
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    ✅ Custom binary format processing (Project 32)
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    ✅ Complex iterative algorithms
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    ✅ Graph processing, custom ML
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    ✅ Precise control over shuffle/sort behavior
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    ✅ Performance-critical hot path requiring hand-tuning
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    ✅ Integration with external systems in map/reduce tasks
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">  USE BOTH TOGETHER:
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    ✅ MapReduce pipeline (Project 21) for ETL
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    ✅ Hive for analytics on ETL output
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    ✅ Best of both worlds
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">"""</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>comparison</span><span class="token" style="color: rgb(57, 58, 52);">)</span></code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># PART H: ADVANCED HIVE FEATURES DEMONSTRATION</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(57, 58, 52);">cat</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span> advanced_hive_features.hql </span><span class="token" style="color: rgb(57, 58, 52);">&lt;&lt;</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'HQLEOF'
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">USE retail;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">-- ═══════════════════════════════════════════════
+</span><span class="token" style="color: rgb(163, 21, 21);">-- FEATURE 1: User-Defined Functions (UDFs)
+</span><span class="token" style="color: rgb(163, 21, 21);">-- When SQL built-in functions are not enough
+</span><span class="token" style="color: rgb(163, 21, 21);">-- ═══════════════════════════════════════════════
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">-- Built-in functions cover most needs:
+</span><span class="token" style="color: rgb(163, 21, 21);">SELECT
+</span><span class="token" style="color: rgb(163, 21, 21);">    order_id,
+</span><span class="token" style="color: rgb(163, 21, 21);">    -- String functions
+</span><span class="token" style="color: rgb(163, 21, 21);">    UPPER(category) as category_upper,
+</span><span class="token" style="color: rgb(163, 21, 21);">    LENGTH(customer_id) as id_length,
+</span><span class="token" style="color: rgb(163, 21, 21);">    SUBSTR(order_date, 1, 7) as year_month,
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">    -- Date functions
+</span><span class="token" style="color: rgb(163, 21, 21);">    DATEDIFF('2024-12-31', order_date) as days_until_year_end,
+</span><span class="token" style="color: rgb(163, 21, 21);">    YEAR(order_date) as order_year,
+</span><span class="token" style="color: rgb(163, 21, 21);">    MONTH(order_date) as order_month,
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">    -- Conditional functions
+</span><span class="token" style="color: rgb(163, 21, 21);">    CASE
+</span><span class="token" style="color: rgb(163, 21, 21);">        WHEN amount &gt; 1000 THEN 'HIGH'
+</span><span class="token" style="color: rgb(163, 21, 21);">        WHEN amount &gt; 100 THEN 'MEDIUM'
+</span><span class="token" style="color: rgb(163, 21, 21);">        ELSE 'LOW'
+</span><span class="token" style="color: rgb(163, 21, 21);">    END as value_tier,
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">    -- Math functions
+</span><span class="token" style="color: rgb(163, 21, 21);">    ROUND(amount * 1.08, 2) as amount_with_tax,
+</span><span class="token" style="color: rgb(163, 21, 21);">    CEIL(amount / 100) as hundred_bucket
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">FROM orders
+</span><span class="token" style="color: rgb(163, 21, 21);">LIMIT 10;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">-- ═══════════════════════════════════════════════
+</span><span class="token" style="color: rgb(163, 21, 21);">-- FEATURE 2: Window Functions
+</span><span class="token" style="color: rgb(163, 21, 21);">-- Powerful analytics without self-joins
+</span><span class="token" style="color: rgb(163, 21, 21);">-- ═══════════════════════════════════════════════
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">-- Running total and rank within each category
+</span><span class="token" style="color: rgb(163, 21, 21);">SELECT
+</span><span class="token" style="color: rgb(163, 21, 21);">    category,
+</span><span class="token" style="color: rgb(163, 21, 21);">    order_date,
+</span><span class="token" style="color: rgb(163, 21, 21);">    amount,
+</span><span class="token" style="color: rgb(163, 21, 21);">    SUM(amount) OVER (
+</span><span class="token" style="color: rgb(163, 21, 21);">        PARTITION BY category
+</span><span class="token" style="color: rgb(163, 21, 21);">        ORDER BY order_date
+</span><span class="token" style="color: rgb(163, 21, 21);">        ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+</span><span class="token" style="color: rgb(163, 21, 21);">    ) as running_total,
+</span><span class="token" style="color: rgb(163, 21, 21);">    ROW_NUMBER() OVER (
+</span><span class="token" style="color: rgb(163, 21, 21);">        PARTITION BY category
+</span><span class="token" style="color: rgb(163, 21, 21);">        ORDER BY amount DESC
+</span><span class="token" style="color: rgb(163, 21, 21);">    ) as rank_in_category,
+</span><span class="token" style="color: rgb(163, 21, 21);">    RANK() OVER (
+</span><span class="token" style="color: rgb(163, 21, 21);">        ORDER BY amount DESC
+</span><span class="token" style="color: rgb(163, 21, 21);">    ) as global_rank
+</span><span class="token" style="color: rgb(163, 21, 21);">FROM orders
+</span><span class="token" style="color: rgb(163, 21, 21);">WHERE status = 'Completed'
+</span><span class="token" style="color: rgb(163, 21, 21);">    AND order_date &gt;= '2024-06-01'
+</span><span class="token" style="color: rgb(163, 21, 21);">LIMIT 20;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">-- ═══════════════════════════════════════════════
+</span><span class="token" style="color: rgb(163, 21, 21);">-- FEATURE 3: LATERAL VIEW + EXPLODE
+</span><span class="token" style="color: rgb(163, 21, 21);">-- Flattening arrays and maps
+</span><span class="token" style="color: rgb(163, 21, 21);">-- ═══════════════════════════════════════════════
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">-- Create a table with array column for demonstration
+</span><span class="token" style="color: rgb(163, 21, 21);">CREATE TABLE IF NOT EXISTS order_tags (
+</span><span class="token" style="color: rgb(163, 21, 21);">    order_id STRING,
+</span><span class="token" style="color: rgb(163, 21, 21);">    tags ARRAY&lt;STRING&gt;
+</span><span class="token" style="color: rgb(163, 21, 21);">)
+</span><span class="token" style="color: rgb(163, 21, 21);">ROW FORMAT DELIMITED
+</span><span class="token" style="color: rgb(163, 21, 21);">    FIELDS TERMINATED BY '|'
+</span><span class="token" style="color: rgb(163, 21, 21);">    COLLECTION ITEMS TERMINATED BY ','
+</span><span class="token" style="color: rgb(163, 21, 21);">STORED AS TEXTFILE;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">-- Insert sample data
+</span><span class="token" style="color: rgb(163, 21, 21);">INSERT INTO order_tags VALUES
+</span><span class="token" style="color: rgb(163, 21, 21);">    ('ORD-001', array('rush', 'gift-wrap', 'fragile')),
+</span><span class="token" style="color: rgb(163, 21, 21);">    ('ORD-002', array('bulk', 'business')),
+</span><span class="token" style="color: rgb(163, 21, 21);">    ('ORD-003', array('rush'));
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">-- Explode array into rows (one row per tag)
+</span><span class="token" style="color: rgb(163, 21, 21);">SELECT
+</span><span class="token" style="color: rgb(163, 21, 21);">    order_id,
+</span><span class="token" style="color: rgb(163, 21, 21);">    tag
+</span><span class="token" style="color: rgb(163, 21, 21);">FROM order_tags
+</span><span class="token" style="color: rgb(163, 21, 21);">LATERAL VIEW EXPLODE(tags) tag_table AS tag;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">-- Count orders per tag
+</span><span class="token" style="color: rgb(163, 21, 21);">SELECT
+</span><span class="token" style="color: rgb(163, 21, 21);">    tag,
+</span><span class="token" style="color: rgb(163, 21, 21);">    COUNT(*) as order_count
+</span><span class="token" style="color: rgb(163, 21, 21);">FROM order_tags
+</span><span class="token" style="color: rgb(163, 21, 21);">LATERAL VIEW EXPLODE(tags) tag_table AS tag
+</span><span class="token" style="color: rgb(163, 21, 21);">GROUP BY tag
+</span><span class="token" style="color: rgb(163, 21, 21);">ORDER BY order_count DESC;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">-- ═══════════════════════════════════════════════
+</span><span class="token" style="color: rgb(163, 21, 21);">-- FEATURE 4: INSERT OVERWRITE — ETL with Hive
+</span><span class="token" style="color: rgb(163, 21, 21);">-- Equivalent to MapReduce job chaining (Project 21)
+</span><span class="token" style="color: rgb(163, 21, 21);">-- ═══════════════════════════════════════════════
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">-- Create a daily summary table
+</span><span class="token" style="color: rgb(163, 21, 21);">CREATE TABLE IF NOT EXISTS daily_category_summary (
+</span><span class="token" style="color: rgb(163, 21, 21);">    report_date     STRING,
+</span><span class="token" style="color: rgb(163, 21, 21);">    category        STRING,
+</span><span class="token" style="color: rgb(163, 21, 21);">    order_count     BIGINT,
+</span><span class="token" style="color: rgb(163, 21, 21);">    total_revenue   DOUBLE,
+</span><span class="token" style="color: rgb(163, 21, 21);">    avg_order_value DOUBLE,
+</span><span class="token" style="color: rgb(163, 21, 21);">    unique_customers BIGINT
+</span><span class="token" style="color: rgb(163, 21, 21);">)
+</span><span class="token" style="color: rgb(163, 21, 21);">STORED AS TEXTFILE;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">-- Populate for a specific date range
+</span><span class="token" style="color: rgb(163, 21, 21);">-- This runs a MapReduce job to compute and store results
+</span><span class="token" style="color: rgb(163, 21, 21);">INSERT OVERWRITE TABLE daily_category_summary
+</span><span class="token" style="color: rgb(163, 21, 21);">SELECT
+</span><span class="token" style="color: rgb(163, 21, 21);">    SUBSTR(order_date, 1, 10) as report_date,
+</span><span class="token" style="color: rgb(163, 21, 21);">    category,
+</span><span class="token" style="color: rgb(163, 21, 21);">    COUNT(*) as order_count,
+</span><span class="token" style="color: rgb(163, 21, 21);">    ROUND(SUM(amount), 2) as total_revenue,
+</span><span class="token" style="color: rgb(163, 21, 21);">    ROUND(AVG(amount), 2) as avg_order_value,
+</span><span class="token" style="color: rgb(163, 21, 21);">    COUNT(DISTINCT customer_id) as unique_customers
+</span><span class="token" style="color: rgb(163, 21, 21);">FROM orders
+</span><span class="token" style="color: rgb(163, 21, 21);">WHERE status IN ('Completed', 'Shipped')
+</span><span class="token" style="color: rgb(163, 21, 21);">    AND order_date &gt;= '2024-06-01'
+</span><span class="token" style="color: rgb(163, 21, 21);">    AND order_date &lt; '2024-07-01'
+</span><span class="token" style="color: rgb(163, 21, 21);">GROUP BY SUBSTR(order_date, 1, 10), category;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">-- Query the summary (fast — pre-aggregated)
+</span><span class="token" style="color: rgb(163, 21, 21);">SELECT * FROM daily_category_summary
+</span><span class="token" style="color: rgb(163, 21, 21);">ORDER BY report_date, total_revenue DESC
+</span><span class="token" style="color: rgb(163, 21, 21);">LIMIT 20;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">-- ═══════════════════════════════════════════════
+</span><span class="token" style="color: rgb(163, 21, 21);">-- FEATURE 5: COMPUTE STATISTICS
+</span><span class="token" style="color: rgb(163, 21, 21);">-- Enables Cost-Based Optimizer (CBO)
+</span><span class="token" style="color: rgb(163, 21, 21);">-- ═══════════════════════════════════════════════
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">-- Compute table-level statistics
+</span><span class="token" style="color: rgb(163, 21, 21);">ANALYZE TABLE orders COMPUTE STATISTICS;
+</span><span class="token" style="color: rgb(163, 21, 21);">ANALYZE TABLE customers COMPUTE STATISTICS;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">-- Compute column-level statistics (for CBO join optimization)
+</span><span class="token" style="color: rgb(163, 21, 21);">ANALYZE TABLE orders COMPUTE STATISTICS FOR COLUMNS
+</span><span class="token" style="color: rgb(163, 21, 21);">    customer_id, category, amount, status;
+</span><span class="token" style="color: rgb(163, 21, 21);">ANALYZE TABLE customers COMPUTE STATISTICS FOR COLUMNS
+</span><span class="token" style="color: rgb(163, 21, 21);">    customer_id, tier;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">-- Verify statistics are collected
+</span><span class="token" style="color: rgb(163, 21, 21);">DESCRIBE FORMATTED orders;
+</span><span class="token" style="color: rgb(163, 21, 21);">-- Look for "Table Parameters" section: numRows, rawDataSize, etc.
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">-- CBO uses these statistics to:
+</span><span class="token" style="color: rgb(163, 21, 21);">-- → Choose optimal join order (smaller table as build side)
+</span><span class="token" style="color: rgb(163, 21, 21);">-- → Estimate result sizes for memory allocation
+</span><span class="token" style="color: rgb(163, 21, 21);">-- → Decide between map-join and reduce-join
+</span><span class="token" style="color: rgb(163, 21, 21);">-- → Parallelize independent stages
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">HQLEOF</span><span>
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"Run advanced features: hive -f advanced_hive_features.hql"</span></code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># PART I: HIVE CONFIGURATION REFERENCE</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"
+</span><span class="token" style="color: rgb(163, 21, 21);">═══════════════════════════════════════════════════════════════
+</span><span class="token" style="color: rgb(163, 21, 21);">HIVE COMMAND REFERENCE — CHEAT SHEET
+</span><span class="token" style="color: rgb(163, 21, 21);">═══════════════════════════════════════════════════════════════
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">TABLE MANAGEMENT:
+</span><span class="token" style="color: rgb(163, 21, 21);">─────────────────
+</span><span class="token" style="color: rgb(163, 21, 21);">  SHOW DATABASES;
+</span><span class="token" style="color: rgb(163, 21, 21);">  CREATE DATABASE retail;
+</span><span class="token" style="color: rgb(163, 21, 21);">  USE retail;
+</span><span class="token" style="color: rgb(163, 21, 21);">  SHOW TABLES;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">  -- External table (data stays in HDFS on DROP)
+</span><span class="token" style="color: rgb(163, 21, 21);">  CREATE EXTERNAL TABLE t (...) LOCATION '/path/';
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">  -- Managed table (data deleted on DROP)
+</span><span class="token" style="color: rgb(163, 21, 21);">  CREATE TABLE t (...);
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">  -- Create from query results
+</span><span class="token" style="color: rgb(163, 21, 21);">  CREATE TABLE t AS SELECT ... FROM ...;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">  -- Add columns (schema evolution)
+</span><span class="token" style="color: rgb(163, 21, 21);">  ALTER TABLE t ADD COLUMNS (new_col STRING);
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">  -- Drop table
+</span><span class="token" style="color: rgb(163, 21, 21);">  DROP TABLE t;                    -- managed: deletes data!
+</span><span class="token" style="color: rgb(163, 21, 21);">  DROP TABLE IF EXISTS t;          -- safe drop
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">  -- Describe table
+</span><span class="token" style="color: rgb(163, 21, 21);">  DESCRIBE t;                      -- columns and types
+</span><span class="token" style="color: rgb(163, 21, 21);">  DESCRIBE FORMATTED t;            -- full metadata
+</span><span class="token" style="color: rgb(163, 21, 21);">  DESCRIBE EXTENDED t;             -- even more detail
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">DATA LOADING:
+</span><span class="token" style="color: rgb(163, 21, 21);">─────────────
+</span><span class="token" style="color: rgb(163, 21, 21);">  -- Move HDFS file into Hive warehouse
+</span><span class="token" style="color: rgb(163, 21, 21);">  LOAD DATA INPATH '/hdfs/path/file.txt' INTO TABLE t;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">  -- Copy local file to Hive warehouse (via HDFS)
+</span><span class="token" style="color: rgb(163, 21, 21);">  LOAD DATA LOCAL INPATH '/local/file.txt' INTO TABLE t;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">  -- Overwrite existing data
+</span><span class="token" style="color: rgb(163, 21, 21);">  LOAD DATA INPATH '/path' OVERWRITE INTO TABLE t;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">  -- Insert from query
+</span><span class="token" style="color: rgb(163, 21, 21);">  INSERT INTO TABLE t SELECT ... FROM ...;
+</span><span class="token" style="color: rgb(163, 21, 21);">  INSERT OVERWRITE TABLE t SELECT ... FROM ...;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">QUERY PATTERNS:
+</span><span class="token" style="color: rgb(163, 21, 21);">───────────────
+</span><span class="token" style="color: rgb(163, 21, 21);">  -- Basic aggregation (→ 1 MapReduce job)
+</span><span class="token" style="color: rgb(163, 21, 21);">  SELECT col, COUNT(*), SUM(val) FROM t GROUP BY col;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">  -- Join (→ 1-2 MapReduce jobs)
+</span><span class="token" style="color: rgb(163, 21, 21);">  SELECT ... FROM t1 JOIN t2 ON t1.key = t2.key;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">  -- Subquery
+</span><span class="token" style="color: rgb(163, 21, 21);">  SELECT * FROM (SELECT ... FROM t GROUP BY ...) sub;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">  -- Window functions
+</span><span class="token" style="color: rgb(163, 21, 21);">  SELECT col, SUM(val) OVER (PARTITION BY grp ORDER BY dt) FROM t;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">  -- Sampling (avoid full table scan for exploration)
+</span><span class="token" style="color: rgb(163, 21, 21);">  SELECT * FROM t TABLESAMPLE(1 PERCENT);
+</span><span class="token" style="color: rgb(163, 21, 21);">  SELECT * FROM t TABLESAMPLE(1000 ROWS);
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">KEY SETTINGS:
+</span><span class="token" style="color: rgb(163, 21, 21);">─────────────
+</span><span class="token" style="color: rgb(163, 21, 21);">  SET hive.fetch.task.conversion=more;     -- fast simple queries
+</span><span class="token" style="color: rgb(163, 21, 21);">  SET hive.auto.convert.join=true;         -- auto map-side join
+</span><span class="token" style="color: rgb(163, 21, 21);">  SET hive.exec.parallel=true;             -- parallel stages
+</span><span class="token" style="color: rgb(163, 21, 21);">  SET hive.vectorized.execution.enabled=true; -- batch processing
+</span><span class="token" style="color: rgb(163, 21, 21);">  SET hive.cbo.enable=true;                -- cost-based optimizer
+</span><span class="token" style="color: rgb(163, 21, 21);">  SET hive.execution.engine=tez;           -- faster engine
+</span><span class="token" style="color: rgb(163, 21, 21);">  SET mapreduce.job.queuename=marketing;   -- YARN queue (Proj 22)
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">DEBUGGING:
+</span><span class="token" style="color: rgb(163, 21, 21);">──────────
+</span><span class="token" style="color: rgb(163, 21, 21);">  EXPLAIN SELECT ...;                      -- execution plan
+</span><span class="token" style="color: rgb(163, 21, 21);">  EXPLAIN EXTENDED SELECT ...;             -- detailed plan
+</span><span class="token" style="color: rgb(163, 21, 21);">  SET hive.log.explain.output=true;        -- plan in logs
+</span><span class="token" style="color: rgb(163, 21, 21);">  SET hive.cli.print.header=true;          -- column names
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">FILES:
+</span><span class="token" style="color: rgb(163, 21, 21);">──────
+</span><span class="token" style="color: rgb(163, 21, 21);">  Hive CLI log:     /tmp/{user}/hive.log
+</span><span class="token" style="color: rgb(163, 21, 21);">  Hive config:      \</span><span class="token" style="color: rgb(54, 172, 170);">$HIVE_HOME</span><span class="token" style="color: rgb(163, 21, 21);">/conf/hive-site.xml
+</span><span class="token" style="color: rgb(163, 21, 21);">  Metastore DB:     Configured in hive-site.xml
+</span><span class="token" style="color: rgb(163, 21, 21);">  Warehouse HDFS:   /user/hive/warehouse/ (default)
+</span><span class="token" style="color: rgb(163, 21, 21);">"</span></code></pre></div>
+<hr>
+<h2>🔑 KEY TAKEAWAY</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>WHAT PROJECT 24 ESTABLISHED:
+</span>
+✅ PROBLEM: Raw MapReduce is powerful but requires Java development
+   for every analysis — inaccessible to SQL-skilled analysts
+   → 125+ lines of Java for a simple GROUP BY
+   → Days of development for joins + aggregations
+   → Only Java developers can query Hadoop data
+
+✅ SOLUTION: Apache Hive — SQL interface to Hadoop
+   → HiveQL: SQL dialect that compiles to MapReduce/Tez jobs
+   → 5 lines of SQL replaces 125 lines of Java
+   → Any SQL user can query HDFS data
+   → Same YARN cluster, same HDFS storage
+
+✅ KEY ARCHITECTURE:
+   → Hive Driver: parses SQL → optimizes → compiles to MR/Tez
+   → Metastore: stores table schemas in MySQL/PostgreSQL/Derby
+   → Data stays in HDFS — Hive only adds schema metadata
+   → Schema-on-Read: schema applied at query time, not load time
+
+✅ MANAGED vs EXTERNAL TABLES:
+   → MANAGED: Hive owns data — DROP TABLE deletes HDFS files
+   → EXTERNAL: Hive borrows data — DROP TABLE only removes schema
+   → RULE: EXTERNAL for production data, MANAGED for intermediate
+
+✅ SerDe (Serializer/Deserializer):
+   → Tells Hive HOW to parse raw files into columns
+   → LazySimpleSerDe for delimited text (default)
+   → Different SerDes for JSON, CSV, ORC, Parquet, Avro
+
+✅ OPTIMIZATION LEVERS:
+   → hive.fetch.task.conversion=more (skip MR for simple queries)
+   → hive.auto.convert.join=true (auto map-side join for small tables)
+   → hive.exec.parallel=true (parallel independent stages)
+   → ANALYZE TABLE ... COMPUTE STATISTICS (enable CBO)
+   → Tez execution engine (5-10x faster than MapReduce)
+
+CONNECTION TO PREVIOUS PROJECTS:
+   → Projects 4-6: Hive GROUP BY compiles to same Mapper+Reducer pattern
+   → Project 9: Hive auto-adds Combiner for aggregations
+   → Project 11: Hive WHERE clause = Map-Only filter
+   → Project 16/17: Hive JOIN = Map-Side or Reduce-Side Join
+   → Project 18: Hive ORDER BY = TotalOrderPartitioner
+   → Project 21: Hive multi-stage queries = Job Chaining
+   → Project 22/23: Hive uses YARN for resource allocation + memory
+
+WHAT HIVE DOES NOT HANDLE YET:
+   → Large tables are slow without PARTITIONING
+   → Full table scans on 2 billion rows for date-filtered queries
+   → Solution: Hive Partitions and Bucketing</code></pre></div>
+<hr>
+<h2>🌉 BRIDGE TO PROJECT 25</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>Project 24 established Hive as the SQL interface to Hadoop.
+</span>But there's a MASSIVE performance problem:
+
+  SELECT SUM(amount) FROM orders WHERE order_date = '2024-06-15';
+
+  → Hive reads ALL 2 billion records from HDFS
+  → Filters 99.95% of them (only 1 day out of 730 days)
+  → MapReduce processes the entire dataset
+  → Takes 45 minutes for a query about ONE DAY
+
+THIS IS CATASTROPHICALLY INEFFICIENT.
+
+What if the data was organized into directories by date?
+  /data/orders/year=2024/month=06/day=15/data.txt
+
+Then Hive could:
+  → Read ONLY the files in that one directory
+  → Skip 729 out of 730 days of data
+  → Query completes in 30 seconds instead of 45 minutes
+  → 90x speedup from PARTITION PRUNING
+
+PROJECT 25 introduces Hive Partitioning and Bucketing:
+  → PARTITIONED BY (year, month): directory-based data organization
+  → Dynamic Partitioning: auto-create partitions from data
+  → CLUSTERED BY (customer_id) INTO 32 BUCKETS: hash-based splitting
+  → Partition Pruning: Hive reads only relevant directories
+  → Bucket Map Join: efficient join on bucketed columns
+
+This is the single biggest performance optimization in Hive —
+turning hour-long queries into seconds.</code></pre></div>
+<hr>
+</div>
+</div>
+
+
+
+<!-- ========== data-index="5" ========== -->
+
+        </div>
+
+        <div class="nav-bar">
+            <a href="project-23.html" class="nav-button prev">← Previous Project</a>
+            <div class="page-info">
+                <a href="index.html" class="nav-button home">📚 Table of Contents</a><br>
+                <span style="margin-top:8px;display:block">Project 24 of 50</span>
+            </div>
+            <a href="project-25.html" class="nav-button next">Next Project →</a>
+        </div>
+    </div>
+
+    
+    <div id="progress-track"><div id="progress-fill"></div></div>
+    <div id="progress-pct">0%</div>
+
+
+<script src="script.js"></script>
+
+</body>
+</html>

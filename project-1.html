@@ -1,0 +1,910 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/png" href="images/favicon.png">
+    <title>Project 1: THE OVERWHELMED LOG SERVER — WHY ONE MACHINE FAILS — Apache Hadoop Masterclass</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <div class="content">
+            <div class="chat-message" data-index="3">
+<div class="px-2"><h1>PROJECT 1: THE OVERWHELMED LOG SERVER — WHY ONE MACHINE FAILS</h1>
+<hr>
+<h2>🔴 HYPOTHETICAL PROBLEM</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>SCENARIO:
+</span>→ You are an engineer at a mid-size e-commerce company
+→ Your web servers generate 50GB of access logs EVERY DAY
+→ Management wants a daily report:
+    - Total page views per product
+    - Top 10 most visited pages
+    - Count of unique visitors per hour
+→ You have ONE server: 8 cores, 16GB RAM, 1TB disk
+
+WHAT HAPPENS:
+→ Day 1-30: Script runs in 20 minutes — fine
+→ Day 31-90: Data grows to 1.5TB — disk full
+→ You add more disk — now 4TB
+→ Day 91-180: Script takes 4 hours — RAM chokes during sorting
+→ Day 181-365: Script takes 14 hours — doesn't finish before next day's data arrives
+→ Day 366: THE SYSTEM BREAKS — you cannot process data faster than it arrives
+
+THIS IS THE EXACT PROBLEM HADOOP WAS BUILT TO SOLVE.</code></pre></div>
+<hr>
+<h2>🔍 HOW TO APPROACH IT</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>STEP 1: Identify the bottleneck categories
+</span>
+┌─────────────────────────────────────────────────┐
+│           SINGLE MACHINE BOTTLENECKS            │
+├─────────────────────────────────────────────────┤
+│ 1. STORAGE BOTTLENECK                           │
+│    → Disk fills up — cannot store more data     │
+│                                                 │
+│ 2. COMPUTE BOTTLENECK                           │
+│    → CPU/RAM cannot process fast enough         │
+│                                                 │
+│ 3. I/O BOTTLENECK                               │
+│    → Disk read speed ~100-200 MB/s              │
+│    → Reading 50GB takes ~5 minutes minimum      │
+│    → Reading 5TB takes ~8 HOURS just to read    │
+│                                                 │
+│ 4. RELIABILITY BOTTLENECK                       │
+│    → One disk fails = ALL data lost             │
+│    → One machine crashes = ZERO processing      │
+└─────────────────────────────────────────────────┘
+
+STEP 2: Understand the two possible solutions
+
+OPTION A: SCALE UP (Vertical Scaling)
+→ Buy a BIGGER machine
+→ 128 cores, 512GB RAM, 100TB RAID
+→ Cost: $50,000 - $500,000
+→ LIMIT: There is a ceiling — you cannot buy infinite hardware
+
+OPTION B: SCALE OUT (Horizontal Scaling)
+→ Buy MANY cheap machines
+→ 100 machines × 8 cores × 16GB RAM × 1TB disk
+→ Cost: $100,000 (commodity hardware)
+→ LIMIT: You need SOFTWARE to coordinate them
+→ THAT SOFTWARE IS HADOOP</code></pre></div>
+<hr>
+<h2>💡 HOW CAN WE SOLVE IT</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>THE CORE INSIGHT:
+</span>
+Instead of bringing DATA to the PROGRAM (one big machine),
+bring the PROGRAM to the DATA (many small machines).
+
+┌─────────── TRADITIONAL APPROACH ───────────┐
+│                                             │
+│   [50GB Data] ──→ [ONE Machine] ──→ Result  │
+│                    (bottleneck)              │
+│                                             │
+└─────────────────────────────────────────────┘
+
+┌─────────── HADOOP APPROACH ────────────────┐
+│                                             │
+│   [10GB] → [Machine 1] → partial result ─┐ │
+│   [10GB] → [Machine 2] → partial result ─┤ │
+│   [10GB] → [Machine 3] → partial result ─┼→ COMBINE → Final Result
+│   [10GB] → [Machine 4] → partial result ─┤ │
+│   [10GB] → [Machine 5] → partial result ─┘ │
+│                                             │
+│   TIME: 5× faster (parallel processing)    │
+│   STORAGE: 5× more (distributed storage)   │
+│   RELIABILITY: If Machine 3 dies,           │
+│                its data exists on Machine 1 │
+│                (replication)                │
+└─────────────────────────────────────────────┘
+
+THIS REQUIRES TWO THINGS:
+1. A DISTRIBUTED FILE SYSTEM   → HDFS (Hadoop Distributed File System)
+2. A DISTRIBUTED COMPUTE MODEL → MapReduce</code></pre></div>
+<hr>
+<h2>✅ WHAT COULD BE DONE</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>HADOOP SOLVES THIS WITH A 4-COMPONENT ARCHITECTURE:
+</span>
+┌──────────────────────────────────────────────────────────────────┐
+│                     HADOOP ECOSYSTEM CORE                        │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌─────────────┐   ┌─────────────┐   ┌──────────────────────┐  │
+│  │   HDFS      │   │  MapReduce  │   │   YARN               │  │
+│  │ (Storage)   │   │ (Processing)│   │ (Resource Management) │  │
+│  └──────┬──────┘   └──────┬──────┘   └──────────┬───────────┘  │
+│         │                 │                      │               │
+│         └─────────────────┼──────────────────────┘               │
+│                           │                                      │
+│                  ┌────────┴────────┐                             │
+│                  │  Hadoop Common  │                             │
+│                  │  (Utilities)    │                             │
+│                  └─────────────────┘                             │
+└──────────────────────────────────────────────────────────────────┘
+
+COMPONENT 1 — HDFS (Storage Layer)
+→ Splits large files into BLOCKS (default 128MB)
+→ Distributes blocks across machines
+→ Replicates each block 3 times (fault tolerance)
+→ One NameNode (master) tracks where blocks live
+→ Many DataNodes (slaves) store actual blocks
+
+COMPONENT 2 — MapReduce (Compute Layer)
+→ MAP phase: Each machine processes its LOCAL data chunk
+→ REDUCE phase: Results are combined across machines
+→ You write the logic — Hadoop handles distribution
+
+COMPONENT 3 — YARN (Resource Layer)
+→ Decides WHICH machine runs WHICH task
+→ Manages CPU and memory allocation
+→ Ensures fair sharing among multiple jobs
+
+COMPONENT 4 — Hadoop Common (Utility Layer)
+→ Shared libraries and utilities
+→ File system abstractions
+→ RPC communication framework</code></pre></div>
+<hr>
+<h2>✅ WHAT SHOULD DO</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>1. UNDERSTAND THE MASTER-SLAVE ARCHITECTURE FIRST
+</span>
+   ┌─────────────────────────────────────────────────────────────┐
+   │                    HADOOP CLUSTER LAYOUT                     │
+   │                                                              │
+   │   ┌──────────────── MASTER NODE ──────────────────┐         │
+   │   │  NameNode        (HDFS Master — metadata)     │         │
+   │   │  ResourceManager  (YARN Master — scheduling)  │         │
+   │   └───────────────────────────────────────────────┘         │
+   │              │              │              │                  │
+   │              ▼              ▼              ▼                  │
+   │   ┌──────────────┐ ┌──────────────┐ ┌──────────────┐       │
+   │   │ SLAVE NODE 1 │ │ SLAVE NODE 2 │ │ SLAVE NODE 3 │       │
+   │   │              │ │              │ │              │         │
+   │   │ DataNode     │ │ DataNode     │ │ DataNode     │        │
+   │   │ NodeManager  │ │ NodeManager  │ │ NodeManager  │        │
+   │   │              │ │              │ │              │         │
+   │   │ [Block A]    │ │ [Block A']   │ │ [Block B]    │        │
+   │   │ [Block C]    │ │ [Block B']   │ │ [Block C']   │        │
+   │   └──────────────┘ └──────────────┘ └──────────────┘       │
+   └─────────────────────────────────────────────────────────────┘
+
+   MASTER NODE knows:
+   → Which files exist
+   → Which blocks make up each file
+   → Which DataNodes hold which blocks
+   → DOES NOT store actual data
+
+   SLAVE NODES do:
+   → Store actual data blocks
+   → Execute computation tasks
+   → Report health back to master
+
+2. THINK "DATA LOCALITY" FROM DAY ONE
+   → Hadoop moves COMPUTATION to where DATA already lives
+   → NOT the other way around
+   → This is the fundamental paradigm shift
+
+3. ACCEPT THAT HARDWARE WILL FAIL
+   → Hadoop ASSUMES machines will crash
+   → Built-in replication handles this
+   → This is not a bug — it is the DESIGN PHILOSOPHY</code></pre></div>
+<hr>
+<h2>🚫 WHAT SHOULD NOT DO</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>1. DO NOT think of Hadoop as a database
+</span>   → Hadoop is NOT for random access queries
+   → Hadoop is for BATCH processing of massive datasets
+   → Querying one row from 1TB? Wrong tool.
+
+2. DO NOT use Hadoop for small data
+   → If your data fits in RAM of one machine → DON'T USE HADOOP
+   → Hadoop overhead (JVM startup, task scheduling, network) 
+     makes small jobs SLOWER than a simple Python script
+   → RULE OF THUMB: If data &lt; 10GB, question whether you need Hadoop
+
+3. DO NOT ignore the Master as single point of failure
+   → If NameNode dies, the ENTIRE cluster is inaccessible
+   → (We address this in Project 44: NameNode HA)
+
+4. DO NOT confuse Hadoop with real-time processing
+   → MapReduce jobs take MINUTES to HOURS
+   → Need sub-second responses? Wrong tool.
+   → (We bridge to streaming in Project 47)
+
+5. DO NOT try to modify files in HDFS
+   → HDFS is WRITE-ONCE, READ-MANY
+   → You cannot edit a file in place
+   → You write a new file with the changes</code></pre></div>
+<hr>
+<h2>🔀 WHEN TO USE WHAT</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>┌──────────────────────────┬────────────────────┬──────────────────┐
+</span>│ SCENARIO                 │ USE HADOOP?        │ BETTER OPTION    │
+├──────────────────────────┼────────────────────┼──────────────────┤
+│ Process 5TB of logs      │ ✅ YES             │ —                │
+│ daily for analytics      │                    │                  │
+├──────────────────────────┼────────────────────┼──────────────────┤
+│ Query a user profile     │ ❌ NO              │ PostgreSQL/MySQL │
+│ by user ID               │                    │                  │
+├──────────────────────────┼────────────────────┼──────────────────┤
+│ ETL pipeline on 500GB    │ ✅ YES             │ —                │
+│ of raw CSV files         │                    │                  │
+├──────────────────────────┼────────────────────┼──────────────────┤
+│ Dashboard with 100ms     │ ❌ NO              │ Redis/Druid      │
+│ response time            │                    │                  │
+├──────────────────────────┼────────────────────┼──────────────────┤
+│ Store 100PB of archival  │ ✅ YES             │ —                │
+│ data cheaply             │                    │                  │
+├──────────────────────────┼────────────────────┼──────────────────┤
+│ Process 500MB CSV file   │ ❌ NO              │ Pandas/Python    │
+│ on your laptop           │                    │                  │
+├──────────────────────────┼────────────────────┼──────────────────┤
+│ Machine learning on      │ ✅ DATA PREP ONLY  │ Spark MLlib for  │
+│ massive training data    │                    │ model training   │
+├──────────────────────────┼────────────────────┼──────────────────┤
+│ Real-time fraud          │ ❌ NO              │ Kafka + Flink    │
+│ detection (milliseconds) │                    │                  │
+└──────────────────────────┴────────────────────┴──────────────────┘</code></pre></div>
+<hr>
+<h2>🚫 WHEN NOT TO USE</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>HARD RULES — HADOOP IS THE WRONG TOOL WHEN:
+</span>
+1. DATA IS SMALL
+   → Less than a few GB
+   → Single machine handles it fine
+   → Hadoop's overhead makes it SLOWER
+
+2. LOW LATENCY IS REQUIRED
+   → Need results in milliseconds or seconds
+   → MapReduce minimum latency: ~30 seconds (JVM startup alone)
+   → Use stream processing or in-memory databases instead
+
+3. LOTS OF SMALL FILES
+   → HDFS NameNode stores metadata for EVERY file in RAM
+   → 1 million tiny files (1KB each) = 1GB data but NameNode overwhelmed
+   → Each file's metadata costs ~150 bytes of NameNode memory
+   → 100 million small files = 15GB of NameNode heap just for metadata
+
+4. RANDOM READ/WRITE PATTERNS
+   → HDFS optimized for sequential reads of large files
+   → Random access is extremely slow
+   → Use HBase (Project 27) or a traditional database
+
+5. ITERATIVE ALGORITHMS
+   → Machine learning algorithms that loop over data many times
+   → MapReduce writes to disk EVERY iteration
+   → Use Apache Spark (Project 48) instead
+
+6. TIGHTLY COUPLED COMPUTATIONS
+   → Tasks that need constant inter-node communication
+   → MapReduce has ONE communication point (shuffle between Map and Reduce)
+   → Use MPI or Spark for such workloads</code></pre></div>
+<hr>
+<h2>⚙️ HOW IT ONLY WORKS — INTERNAL MECHANICS</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>THE BIRTH STORY — WHY THIS EXISTS:
+</span>
+2003: Google publishes "The Google File System" paper
+2004: Google publishes "MapReduce" paper
+2005: Doug Cutting (Yahoo!) creates open-source implementation
+      Named after his son's toy elephant → "Hadoop"
+2006: Hadoop becomes an Apache project
+2008: Yahoo! runs Hadoop on 10,000-node cluster
+
+═══════════════════════════════════════════════════════════
+
+INTERNAL MECHANIC 1: HOW HDFS STORES A FILE
+
+Given: A 400MB file "access_log.txt"
+
+Step 1 — Client contacts NameNode
+   Client: "I want to store access_log.txt"
+   NameNode: "OK, I'll split it into blocks"
+
+Step 2 — Block splitting
+   Block 1: bytes 0 - 128MB
+   Block 2: bytes 128MB - 256MB
+   Block 3: bytes 256MB - 384MB
+   Block 4: bytes 384MB - 400MB (partial block, only 16MB)
+
+Step 3 — NameNode decides placement (replication factor = 3)
+   Block 1 → DataNode 1, DataNode 3, DataNode 5
+   Block 2 → DataNode 2, DataNode 4, DataNode 1
+   Block 3 → DataNode 3, DataNode 5, DataNode 2
+   Block 4 → DataNode 4, DataNode 1, DataNode 3
+
+Step 4 — Pipeline replication
+   Client sends Block 1 to DataNode 1
+   DataNode 1 simultaneously forwards to DataNode 3
+   DataNode 3 simultaneously forwards to DataNode 5
+   (NOT client sending 3 copies — it's a PIPELINE)
+
+   ┌────────┐    ┌────────────┐    ┌────────────┐    ┌────────────┐
+   │ Client │───→│ DataNode 1 │───→│ DataNode 3 │───→│ DataNode 5 │
+   └────────┘    └────────────┘    └────────────┘    └────────────┘
+                  (stores copy1)   (stores copy2)    (stores copy3)
+
+Step 5 — NameNode records metadata
+   Metadata stored IN MEMORY for fast lookups:
+   {
+     "access_log.txt": {
+       "blocks": [
+         {"id": "blk_001", "nodes": [DN1, DN3, DN5], "size": 128MB},
+         {"id": "blk_002", "nodes": [DN2, DN4, DN1], "size": 128MB},
+         {"id": "blk_003", "nodes": [DN3, DN5, DN2], "size": 128MB},
+         {"id": "blk_004", "nodes": [DN4, DN1, DN3], "size": 16MB}
+       ]
+     }
+   }
+
+═══════════════════════════════════════════════════════════
+
+INTERNAL MECHANIC 2: HOW MAPREDUCE PROCESSES DATA
+
+Given: Count page views per product from access_log.txt
+
+Step 1 — INPUT SPLITS (one per block typically)
+   Split 1 → assigned to Machine holding Block 1 (data locality!)
+   Split 2 → assigned to Machine holding Block 2
+   Split 3 → assigned to Machine holding Block 3
+   Split 4 → assigned to Machine holding Block 4
+
+Step 2 — MAP PHASE (runs in parallel on ALL 4 machines)
+   Each mapper reads its local split line by line:
+   
+   Machine 1 reads Block 1:
+     "GET /product/shoe" → emit("shoe", 1)
+     "GET /product/hat"  → emit("hat", 1)
+     "GET /product/shoe" → emit("shoe", 1)
+
+   Machine 2 reads Block 2 simultaneously:
+     "GET /product/hat"  → emit("hat", 1)
+     "GET /product/bag"  → emit("bag", 1)
+
+Step 3 — SHUFFLE &amp; SORT (Hadoop handles this automatically)
+   All values for the SAME KEY go to the SAME REDUCER:
+   
+   Reducer 1 receives: ("bag", [1])
+   Reducer 2 receives: ("hat", [1, 1])
+   Reducer 3 receives: ("shoe", [1, 1])
+
+Step 4 — REDUCE PHASE (runs in parallel)
+   Reducer 1: ("bag", [1])    → emit("bag", 1)
+   Reducer 2: ("hat", [1, 1]) → emit("hat", 2)
+   Reducer 3: ("shoe",[1, 1]) → emit("shoe", 2)
+
+Step 5 — OUTPUT (written back to HDFS)
+   part-r-00000: bag    1
+   part-r-00001: hat    2
+   part-r-00002: shoe   2
+
+═══════════════════════════════════════════════════════════
+
+INTERNAL MECHANIC 3: HEARTBEAT SYSTEM
+
+   Every DataNode sends a HEARTBEAT to NameNode every 3 seconds
+   
+   ┌────────────┐  heartbeat (3s)  ┌──────────┐
+   │ DataNode 1 │ ───────────────→ │          │
+   │ DataNode 2 │ ───────────────→ │ NameNode │
+   │ DataNode 3 │ ───────────────→ │          │
+   │ DataNode 4 │ ─────── X ─────→ │          │
+   └────────────┘  (missed!)       └──────────┘
+
+   If NameNode receives no heartbeat for 10 minutes (default):
+   → Declares DataNode 4 DEAD
+   → Finds all blocks that were on DataNode 4
+   → Re-replicates those blocks to other healthy DataNodes
+   → Cluster HEALS ITSELF automatically</code></pre></div>
+<hr>
+<h2>⚠️ COMMON PITFALLS AND FAILURE MODES</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>PITFALL 1: "I installed Hadoop but it's incredibly slow on my laptop"
+</span>→ REASON: Hadoop is designed for clusters, not single machines
+→ Local/pseudo-distributed mode is for DEVELOPMENT ONLY
+→ Real performance requires 3+ machines minimum
+
+PITFALL 2: "NameNode ran out of memory"
+→ REASON: Too many small files — each file/block uses ~150 bytes of heap
+→ 200 million files × 150 bytes = 30GB heap needed
+→ SOLUTION: Merge small files, use SequenceFile/HAR archives
+
+PITFALL 3: "My MapReduce job runs but produces wrong results"
+→ REASON: Block split happens at byte boundary, not line boundary
+→ BUT — Hadoop's TextInputFormat handles this:
+   → If a line spans two blocks, the mapper reading the FIRST block
+     reads past the block boundary to complete the line
+   → The mapper reading the SECOND block skips the partial first line
+→ SOLUTION: Use standard InputFormats — they handle this correctly
+
+PITFALL 4: "DataNode disk is full"
+→ REASON: Replication factor 3 means 1TB of data needs 3TB of disk
+→ Plus intermediate MapReduce data uses local disk
+→ RULE: Plan for 3× raw data size + 30% overhead
+
+PITFALL 5: "Cluster is up but no jobs can run"
+→ REASON: YARN not started, or ResourceManager not configured
+→ HDFS running ≠ Computation possible
+→ HDFS and YARN are SEPARATE systems that must both be running</code></pre></div>
+<hr>
+<h2>📈 SCALABILITY CONSIDERATIONS</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>HADOOP SCALES LINEARLY (in theory):
+</span>
+┌────────────┬──────────┬──────────────┬───────────────┐
+│ Cluster    │ Storage  │ Compute      │ Throughput     │
+│ Size       │          │ Power        │                │
+├────────────┼──────────┼──────────────┼───────────────┤
+│ 5 nodes    │ 5TB      │ 40 cores     │ 1GB/s read    │
+│ 50 nodes   │ 50TB     │ 400 cores    │ 10GB/s read   │
+│ 500 nodes  │ 500TB    │ 4000 cores   │ 100GB/s read  │
+│ 5000 nodes │ 5PB      │ 40000 cores  │ 1TB/s read    │
+└────────────┴──────────┴──────────────┴───────────────┘
+
+WHY "IN THEORY":
+→ NameNode is a single point — metadata management has limits
+→ Network bandwidth becomes bottleneck during shuffle phase
+→ Job scheduling overhead grows with cluster size
+→ Solutions exist: HDFS Federation (Project 43), YARN tuning (Project 23)
+
+REAL-WORLD SCALE REFERENCES:
+→ Facebook (2012): 100PB stored in HDFS
+→ Yahoo! (2013): 42,000 nodes in a single cluster
+→ Apple (2023): One of the largest Hadoop deployments globally</code></pre></div>
+<hr>
+<h2>🔍 INTERPRETABILITY CONSIDERATIONS</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>UNDERSTANDING WHAT HADOOP TELLS YOU:
+</span>
+1. WEB UIs — Your primary windows into the cluster
+
+   ┌────────────────────────────────────────────────┐
+   │ NameNode UI:     http://namenode-host:9870     │
+   │ → Shows: HDFS capacity, live/dead DataNodes,   │
+   │          file browser, block info               │
+   │                                                 │
+   │ ResourceManager: http://rm-host:8088            │
+   │ → Shows: Running/completed/failed applications, │
+   │          cluster resources, queue usage          │
+   │                                                 │
+   │ Job History:     http://history-host:19888      │
+   │ → Shows: Completed job details, counters,       │
+   │          task attempt logs                       │
+   └────────────────────────────────────────────────┘
+
+2. KEY METRICS TO WATCH:
+   → HDFS: % disk used, under-replicated blocks, dead DataNodes
+   → YARN: Available memory/vcores, pending applications
+   → Jobs: Map/Reduce progress, failed task attempts
+
+3. LOGS LOCATION:
+   → $HADOOP_HOME/logs/ for daemon logs
+   → Application logs aggregated by YARN (configured)</code></pre></div>
+<hr>
+<h2>💻 COMPLETE WORKING CODE</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># PROJECT 1: Setting Up Hadoop &amp; Proving Why Distribution Works</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── PART A: INSTALL HADOOP (Pseudo-Distributed Mode on Ubuntu/Mac) ──</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 1: Prerequisites</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">sudo</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">apt</span><span> update
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">sudo</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">apt</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">install</span><span> -y openjdk-11-jdk </span><span class="token" style="color: rgb(57, 58, 52);">ssh</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">rsync</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Verify Java</span><span>
+</span>java -version
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Expected: openjdk version "11.x.x"</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 2: Set JAVA_HOME</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64'</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">&gt;&gt;</span><span> ~/.bashrc
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">source</span><span> ~/.bashrc
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 3: Download Hadoop 3.3.6</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">cd</span><span> /opt
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">wget</span><span> https://dlcdn.apache.org/hadoop/common/hadoop-3.3.6/hadoop-3.3.6.tar.gz
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">tar</span><span> -xzf hadoop-3.3.6.tar.gz
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">mv</span><span> hadoop-3.3.6 hadoop
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 4: Set Hadoop environment variables</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">cat</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">&gt;&gt;</span><span> ~/.bashrc </span><span class="token" style="color: rgb(57, 58, 52);">&lt;&lt;</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'EOF'
+</span><span class="token" style="color: rgb(163, 21, 21);">export HADOOP_HOME=/opt/hadoop
+</span><span class="token" style="color: rgb(163, 21, 21);">export HADOOP_CONF_DIR=$HADOOP_HOME/etc/hadoop
+</span><span class="token" style="color: rgb(163, 21, 21);">export PATH=$PATH:$HADOOP_HOME/bin:$HADOOP_HOME/sbin
+</span><span class="token" style="color: rgb(163, 21, 21);">export HDFS_NAMENODE_USER=root
+</span><span class="token" style="color: rgb(163, 21, 21);">export HDFS_DATANODE_USER=root
+</span><span class="token" style="color: rgb(163, 21, 21);">export HDFS_SECONDARYNAMENODE_USER=root
+</span><span class="token" style="color: rgb(163, 21, 21);">export YARN_RESOURCEMANAGER_USER=root
+</span><span class="token" style="color: rgb(163, 21, 21);">export YARN_NODEMANAGER_USER=root
+</span><span class="token" style="color: rgb(163, 21, 21);">EOF</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">source</span><span> ~/.bashrc
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 5: Configure SSH (Hadoop nodes communicate via SSH)</span><span>
+</span><span>ssh-keygen -t rsa -P </span><span class="token" style="color: rgb(163, 21, 21);">''</span><span> -f ~/.ssh/id_rsa
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">cat</span><span> ~/.ssh/id_rsa.pub </span><span class="token" style="color: rgb(57, 58, 52);">&gt;&gt;</span><span> ~/.ssh/authorized_keys
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">chmod</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">600</span><span> ~/.ssh/authorized_keys
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">ssh</span><span> localhost   </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Should connect without password — type 'exit' to return</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 6: Set JAVA_HOME in Hadoop's env file</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"export JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64"</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">&gt;&gt;</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">$HADOOP_HOME</span><span>/etc/hadoop/hadoop-env.sh</span></code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">&lt;!-- ── PART B: CONFIGURE HADOOP (4 Core Configuration Files) ── --&gt;</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">&lt;!-- FILE 1: $HADOOP_HOME/etc/hadoop/core-site.xml --&gt;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">&lt;!-- PURPOSE: Tells Hadoop where the master NameNode lives --&gt;</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">configuration</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">property</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">name</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>fs.defaultFS</span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">name</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">value</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>hdfs://localhost:9000</span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">value</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">&lt;!-- This is the address of the NameNode --&gt;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">&lt;!-- ALL HDFS operations go through this address --&gt;</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">property</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">property</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">name</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>hadoop.tmp.dir</span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">name</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">value</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>/opt/hadoop/tmp</span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">value</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">&lt;!-- Temporary directory for Hadoop data --&gt;</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">property</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">configuration</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">&lt;!-- FILE 2: $HADOOP_HOME/etc/hadoop/hdfs-site.xml --&gt;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">&lt;!-- PURPOSE: Configures HDFS behavior --&gt;</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">configuration</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">property</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">name</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>dfs.replication</span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">name</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">value</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>1</span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">value</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">&lt;!-- Replication factor = 1 for pseudo-distributed --&gt;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">&lt;!-- In production: 3 (default) --&gt;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">&lt;!-- We use 1 because we only have 1 machine --&gt;</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">property</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">property</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">name</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>dfs.namenode.name.dir</span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">name</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">value</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>/opt/hadoop/data/namenode</span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">value</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">property</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">property</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">name</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>dfs.datanode.data.dir</span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">name</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">value</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>/opt/hadoop/data/datanode</span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">value</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">property</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">configuration</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">&lt;!-- FILE 3: $HADOOP_HOME/etc/hadoop/mapred-site.xml --&gt;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">&lt;!-- PURPOSE: Tells MapReduce to use YARN as its execution engine --&gt;</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">configuration</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">property</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">name</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>mapreduce.framework.name</span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">name</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">value</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>yarn</span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">value</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">&lt;!-- MapReduce runs ON TOP of YARN --&gt;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">&lt;!-- YARN manages resources, MapReduce does computation --&gt;</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">property</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">property</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">name</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>mapreduce.application.classpath</span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">name</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">value</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>$HADOOP_HOME/share/hadoop/mapreduce/*:$HADOOP_HOME/share/hadoop/mapreduce/lib/*</span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">value</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">property</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">configuration</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">&lt;!-- FILE 4: $HADOOP_HOME/etc/hadoop/yarn-site.xml --&gt;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">&lt;!-- PURPOSE: Configures YARN resource management --&gt;</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">configuration</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">property</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">name</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>yarn.nodemanager.aux-services</span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">name</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">value</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>mapreduce_shuffle</span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">value</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">&lt;!-- Enables the shuffle service needed by MapReduce --&gt;</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">property</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">property</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">name</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>yarn.nodemanager.env-whitelist</span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">name</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span class="token" style="color: rgb(128, 0, 0);">value</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>JAVA_HOME,HADOOP_COMMON_HOME,HADOOP_HDFS_HOME,HADOOP_CONF_DIR,CLASSPATH_PREPEND_DISTCACHE,HADOOP_YARN_HOME,HADOOP_HOME,PATH,LANG,TZ,HADOOP_MAPRED_HOME</span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">value</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">property</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">&lt;/</span><span class="token" style="color: rgb(128, 0, 0);">configuration</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span></code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── PART C: FORMAT AND START THE CLUSTER ──</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 1: Create data directories</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">mkdir</span><span> -p /opt/hadoop/tmp
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">mkdir</span><span> -p /opt/hadoop/data/namenode
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">mkdir</span><span> -p /opt/hadoop/data/datanode
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 2: Format the NameNode (ONLY ONCE — first time setup)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># This creates the initial filesystem metadata</span><span>
+</span>hdfs namenode -format
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Expected: "Storage directory ... has been successfully formatted"</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ⚠️ WARNING: NEVER format NameNode on a running cluster</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#              It ERASES all metadata — all files become inaccessible</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 3: Start HDFS (NameNode + DataNode)</span><span>
+</span>start-dfs.sh
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Expected output:</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#   Starting namenodes on [localhost]</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#   Starting datanodes</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#   Starting secondary namenodes</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 4: Start YARN (ResourceManager + NodeManager)</span><span>
+</span>start-yarn.sh
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Expected output:</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#   Starting resourcemanager</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#   Starting nodemanagers</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 5: Verify all 5 daemons are running</span><span>
+</span>jps
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Expected output (5 Java processes):</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#   NameNode</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#   DataNode</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#   SecondaryNameNode</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#   ResourceManager</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#   NodeManager</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 6: Verify via Web UIs</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Open in browser:</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#   HDFS:  http://localhost:9870   → Should show 1 live DataNode</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#   YARN:  http://localhost:8088   → Should show cluster metrics</span></code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── PART D: PROVE THE SYSTEM WORKS ──</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 1: Create a directory in HDFS</span><span>
+</span>hdfs dfs -mkdir -p /user/root/test
+
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 2: Verify it exists</span><span>
+</span>hdfs dfs -ls /user/root/
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Expected: drwxr-xr-x   - root supergroup  0 ... /user/root/test</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 3: Create a test file locally</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"Hello Hadoop"</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span> /tmp/hello.txt
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"This is distributed computing"</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">&gt;&gt;</span><span> /tmp/hello.txt
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"Hadoop stores this across blocks"</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">&gt;&gt;</span><span> /tmp/hello.txt
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 4: Upload to HDFS</span><span>
+</span>hdfs dfs -put /tmp/hello.txt /user/root/test/
+
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 5: Read it back from HDFS</span><span>
+</span>hdfs dfs -cat /user/root/test/hello.txt
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Expected:</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#   Hello Hadoop</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#   This is distributed computing</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#   Hadoop stores this across blocks</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 6: Check file details (block info)</span><span>
+</span><span>hdfs dfs -stat </span><span class="token" style="color: rgb(163, 21, 21);">"%n %b %r %o"</span><span> /user/root/test/hello.txt
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># %n = filename</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># %b = file size in bytes</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># %r = replication factor</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># %o = block size</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 7: Get detailed block report</span><span>
+</span><span>hdfs </span><span class="token" style="color: rgb(57, 58, 52);">fsck</span><span> /user/root/test/hello.txt -files -blocks -locations
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># This shows:</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#   → Which blocks make up the file</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#   → Which DataNodes hold each block</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#   → Replication status</span></code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── PART E: PYTHON SCRIPT — PROVE WHY SINGLE MACHINE FAILS ──</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># This demonstrates the PROBLEM that motivates Hadoop</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> time
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> os
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> tempfile
+</span>
+<span></span><span class="token" style="color: rgb(0, 0, 255);">def</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">generate_fake_log</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>filepath</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> size_mb</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>    </span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">"""Generate a fake access log of specified size."""</span><span>
+</span><span>    products </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(163, 21, 21);">"shoe"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"hat"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"bag"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"shirt"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"watch"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"phone"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"laptop"</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span>
+</span><span>    line </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"192.168.1.1 - - [01/Jan/2024:00:00:00] GET /product/{} HTTP/1.1 200\n"</span><span>
+</span>    
+<span>    bytes_written </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">0</span><span>
+</span><span>    target_bytes </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> size_mb </span><span class="token" style="color: rgb(57, 58, 52);">*</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">1024</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">*</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">1024</span><span>
+</span>    
+<span>    </span><span class="token" style="color: rgb(0, 0, 255);">with</span><span> </span><span class="token builtin">open</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>filepath</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'w'</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> f</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>        i </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">0</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">while</span><span> bytes_written </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span> target_bytes</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>            product </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> products</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span>i </span><span class="token" style="color: rgb(57, 58, 52);">%</span><span> </span><span class="token builtin">len</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>products</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span>
+</span><span>            entry </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> line</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token builtin">format</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>product</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>            f</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>write</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>entry</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>            bytes_written </span><span class="token" style="color: rgb(57, 58, 52);">+=</span><span> </span><span class="token builtin">len</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>entry</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>            i </span><span class="token" style="color: rgb(57, 58, 52);">+=</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">1</span><span>
+</span>    
+<span>    </span><span class="token" style="color: rgb(0, 0, 255);">return</span><span> bytes_written
+</span>
+<span></span><span class="token" style="color: rgb(0, 0, 255);">def</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">count_pageviews_single_machine</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>filepath</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>    </span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">"""Process log file on a SINGLE machine — the traditional way."""</span><span>
+</span><span>    counts </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span>    
+<span>    start_time </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> time</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>time</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    </span><span class="token" style="color: rgb(0, 0, 255);">with</span><span> </span><span class="token builtin">open</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>filepath</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'r'</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> f</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">for</span><span> line </span><span class="token" style="color: rgb(0, 0, 255);">in</span><span> f</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>            parts </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> line</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>strip</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>split</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>            </span><span class="token" style="color: rgb(0, 0, 255);">if</span><span> </span><span class="token builtin">len</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>parts</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">&gt;=</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">7</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Extract product from URL: /product/shoe → shoe</span><span>
+</span><span>                url </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> parts</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(54, 172, 170);">6</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span>
+</span><span>                product </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> url</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>split</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">'/'</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(57, 58, 52);">-</span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span>
+</span><span>                counts</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span>product</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> counts</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>get</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>product</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">0</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">+</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">1</span><span>
+</span>    
+<span>    elapsed </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> time</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>time</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">-</span><span> start_time
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">return</span><span> counts</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> elapsed
+</span>
+<span></span><span class="token" style="color: rgb(0, 0, 255);">def</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">simulate_distributed_processing</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>filepath</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> num_chunks</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>    </span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">"""
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    Simulate what Hadoop does:
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    Split the file into chunks and process each independently.
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    Then combine results.
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    This is NOT actual Hadoop — it demonstrates the CONCEPT.
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    """</span><span>
+</span><span>    file_size </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> os</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>path</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>getsize</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>filepath</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    chunk_size </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> file_size </span><span class="token" style="color: rgb(57, 58, 52);">//</span><span> num_chunks
+</span>    
+<span>    partial_results </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span>
+</span><span>    start_time </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> time</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>time</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── MAP PHASE: Each "machine" processes its chunk ──</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">with</span><span> </span><span class="token builtin">open</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>filepath</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'r'</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">as</span><span> f</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">for</span><span> chunk_id </span><span class="token" style="color: rgb(0, 0, 255);">in</span><span> </span><span class="token builtin">range</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>num_chunks</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>            chunk_counts </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span><span>            bytes_read </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">0</span><span>
+</span>            
+<span>            </span><span class="token" style="color: rgb(0, 0, 255);">for</span><span> line </span><span class="token" style="color: rgb(0, 0, 255);">in</span><span> f</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>                parts </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> line</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>strip</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>split</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 0, 255);">if</span><span> </span><span class="token builtin">len</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>parts</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">&gt;=</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">7</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>                    url </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> parts</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(54, 172, 170);">6</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span>
+</span><span>                    product </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> url</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>split</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">'/'</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(57, 58, 52);">-</span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span>
+</span><span>                    chunk_counts</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span>product</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> chunk_counts</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>get</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>product</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">0</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">+</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">1</span><span>
+</span>                
+<span>                bytes_read </span><span class="token" style="color: rgb(57, 58, 52);">+=</span><span> </span><span class="token builtin">len</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>line</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 0, 255);">if</span><span> bytes_read </span><span class="token" style="color: rgb(57, 58, 52);">&gt;=</span><span> chunk_size </span><span class="token" style="color: rgb(0, 0, 255);">and</span><span> chunk_id </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span> num_chunks </span><span class="token" style="color: rgb(57, 58, 52);">-</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>                    </span><span class="token" style="color: rgb(0, 0, 255);">break</span><span>
+</span>            
+<span>            partial_results</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>append</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>chunk_counts</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>            </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"  Mapper </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">chunk_id </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">+</span><span class="token string-interpolation interpolation"> </span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">1</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> processed: </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">chunk_counts</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── REDUCE PHASE: Combine all partial results ──</span><span>
+</span><span>    final_counts </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">for</span><span> partial </span><span class="token" style="color: rgb(0, 0, 255);">in</span><span> partial_results</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">for</span><span> product</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> count </span><span class="token" style="color: rgb(0, 0, 255);">in</span><span> partial</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>items</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>            final_counts</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span>product</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> final_counts</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>get</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>product</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">0</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">+</span><span> count
+</span>    
+<span>    elapsed </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> time</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>time</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">-</span><span> start_time
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">return</span><span> final_counts</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> elapsed
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># MAIN DEMONSTRATION</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 0, 255);">if</span><span> __name__ </span><span class="token" style="color: rgb(57, 58, 52);">==</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"__main__"</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"="</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">*</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">70</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"PROJECT 1: WHY ONE MACHINE FAILS — HADOOP MOTIVATION"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"="</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">*</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">70</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Generate test data (100MB to show the concept without waiting forever)</span><span>
+</span><span>    log_file </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> os</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>path</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>join</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>tempfile</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>gettempdir</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"access_log_100mb.txt"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"\n[1] Generating 100MB fake access log..."</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    total_bytes </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> generate_fake_log</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>log_file</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">100</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"    Generated: </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">total_bytes </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">/</span><span class="token string-interpolation interpolation"> </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">1024</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">1024</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">)</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">.1f</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> MB"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── Single machine processing ──</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"\n[2] Processing on SINGLE machine (traditional approach)..."</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    single_result</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> single_time </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> count_pageviews_single_machine</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>log_file</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"    Results: </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">single_result</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"    Time:    </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">single_time</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">.2f</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> seconds"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── Simulated distributed processing (4 "machines") ──</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"\n[3] Simulated DISTRIBUTED processing (4 mappers)..."</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    dist_result</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> dist_time </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> simulate_distributed_processing</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>log_file</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">4</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"\n    Combined Results: </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">dist_result</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"    Time:             </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">dist_time</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">.2f</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> seconds"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── The point ──</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"\n"</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">+</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"="</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">*</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">70</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"KEY INSIGHT:"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"="</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">*</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">70</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"""
+</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">    On 100MB, single machine is FINE (</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">single_time</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">.2f</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">s).
+</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">    But imagine this at 100TB:
+</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">    
+</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">    Single machine:
+</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">      → 100TB / 200MB/s disk speed = ~139 HOURS just to READ
+</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">      → Processing would take DAYS
+</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">      → If machine crashes halfway → START OVER
+</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">    
+</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">    Hadoop with 1000 nodes:
+</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">      → Each node reads 100GB = ~8 minutes
+</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">      → Processing finishes in ~15 minutes
+</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">      → If 10 nodes crash → Hadoop retries on other nodes
+</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">      → NO DATA LOSS (3x replication)
+</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">    
+</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">    THIS is why Hadoop exists.
+</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">    The problem is not ALGORITHM — it is PHYSICS.
+</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">    One disk cannot read fast enough.
+</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">    One machine cannot hold enough data.
+</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">    One failure cannot be tolerated.
+</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">    """</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Cleanup</span><span>
+</span><span>    os</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>remove</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>log_file</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"[CLEANUP] Temporary log file removed."</span><span class="token" style="color: rgb(57, 58, 52);">)</span></code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── PART F: VERIFY YOUR COMPLETE SETUP ──</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Run this checklist to confirm everything works:</span><span>
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"=== HADOOP SETUP VERIFICATION ==="</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Check 1: All daemons running</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"--- Running Daemons ---"</span><span>
+</span><span>jps </span><span class="token" style="color: rgb(57, 58, 52);">|</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">grep</span><span> -E </span><span class="token" style="color: rgb(163, 21, 21);">"NameNode|DataNode|ResourceManager|NodeManager"</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Check 2: HDFS is accessible</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"--- HDFS Status ---"</span><span>
+</span><span>hdfs dfsadmin -report </span><span class="token" style="color: rgb(57, 58, 52);">|</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">head</span><span> -20
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Check 3: YARN is accessible  </span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"--- YARN Status ---"</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">yarn</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">node</span><span> -list </span><span class="token file-descriptor" style="color: rgb(238, 153, 0); font-weight: bold;">2</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>/dev/null </span><span class="token" style="color: rgb(57, 58, 52);">|</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">head</span><span> -10
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Check 4: Can create and read files</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"--- HDFS Read/Write Test ---"</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"Hadoop is working!"</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">|</span><span> hdfs dfs -put - /user/root/test/verify.txt
+</span>hdfs dfs -cat /user/root/test/verify.txt
+
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Check 5: MapReduce example works</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"--- MapReduce Smoke Test ---"</span><span>
+</span><span>hadoop jar </span><span class="token" style="color: rgb(54, 172, 170);">$HADOOP_HOME</span><span>/share/hadoop/mapreduce/hadoop-mapreduce-examples-3.3.6.jar pi </span><span class="token" style="color: rgb(54, 172, 170);">2</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">10</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># This calculates Pi using MapReduce — if it completes, your setup is CORRECT</span><span>
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"=== ALL CHECKS PASSED — HADOOP IS READY ==="</span></code></pre></div>
+<hr>
+<h2>🔑 KEY TAKEAWAY</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>WHAT WE ESTABLISHED IN PROJECT 1:
+</span>
+✅ The PROBLEM: Single machines cannot handle data that grows
+   faster than hardware improves
+   
+✅ The SOLUTION: Distribute data AND computation across
+   many cheap machines
+   
+✅ The ARCHITECTURE: Master-Slave paradigm
+   → NameNode (master) knows WHERE data is
+   → DataNodes (slaves) STORE the actual data
+   → ResourceManager (master) SCHEDULES computation
+   → NodeManagers (slaves) EXECUTE computation
+   
+✅ The PHILOSOPHY:
+   → Move computation to data (not data to computation)
+   → Assume hardware WILL fail (replicate everything)
+   → Write once, read many (immutable data)
+   
+✅ The SETUP: Hadoop running in pseudo-distributed mode
+   with all 5 daemons verified
+
+WHAT WE DID NOT COVER YET:
+   → How HDFS actually splits and stores files (block mechanics)
+   → How to interact with HDFS beyond basic verification
+   → How MapReduce code actually looks in Java</code></pre></div>
+<hr>
+<h2>🌉 BRIDGE TO PROJECT 2</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>NOW THAT WE UNDERSTAND WHY HADOOP EXISTS...
+</span>
+PROJECT 2 asks: "How does HDFS ACTUALLY store a 10GB file
+that no single machine can open?"
+
+We will dive deep into:
+→ Block splitting mechanics (128MB default)
+→ NameNode metadata structures
+→ DataNode block storage on local filesystem  
+→ Replication pipeline internals
+→ What happens when you run: hdfs dfs -put bigfile.txt /data/
+
+The architecture diagram from THIS project becomes REAL
+in the next one — you will SEE blocks, TOUCH metadata,
+and UNDERSTAND why 128MB is the magic number.</code></pre></div>
+<hr>
+</div>
+</div>
+
+<!-- ========== data-index="5" ========== -->
+
+        </div>
+
+        <div class="nav-bar">
+            <a href="project-0.html" class="nav-button prev">← Previous Project</a>
+            <div class="page-info">
+                <a href="index.html" class="nav-button home">📚 Table of Contents</a><br>
+                <span style="margin-top:8px;display:block">Project 1 of 50</span>
+            </div>
+            <a href="project-2.html" class="nav-button next">Next Project →</a>
+        </div>
+    </div>
+
+    
+    <div id="progress-track"><div id="progress-fill"></div></div>
+    <div id="progress-pct">0%</div>
+
+
+<script src="script.js"></script>
+
+</body>
+</html>

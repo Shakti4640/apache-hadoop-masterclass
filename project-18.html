@@ -1,0 +1,1144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/png" href="images/favicon.png">
+    <title>Project 18: SORTING ALL EMPLOYEE SALARIES GLOBALLY ACROSS THE CLUSTER — Apache Hadoop Masterclass</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <div class="content">
+            <div class="chat-message" data-index="5">
+<div class="px-2"><h1>PROJECT 18: SORTING ALL EMPLOYEE SALARIES GLOBALLY ACROSS THE CLUSTER</h1>
+<hr>
+<h2>🔴 HYPOTHETICAL PROBLEM</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>SCENARIO:
+</span>→ You are a compensation analyst at a multinational corporation
+→ 85 million employee salary records across 40 countries
+→ Data sits in HDFS as output from a Reduce-Side Join (Project 17)
+   that merged employee profiles with payroll tables
+→ Management demands a SINGLE SORTED FILE of all employees
+   ordered by salary from lowest to highest
+
+FORMAT (each line):
+  EMP_ID | NAME | COUNTRY | DEPARTMENT | ANNUAL_SALARY_USD
+
+SAMPLE:
+  E00001 | Maria Santos   | Brazil  | Engineering | 42000
+  E00002 | John Smith     | USA     | Marketing   | 78000
+  E00003 | Akiko Tanaka   | Japan   | Finance     | 65000
+  ...85 million more rows...
+
+REQUIREMENT:
+→ Output must be GLOBALLY sorted by salary
+→ If you concatenate part-r-00000, part-r-00001, ..., part-r-00099
+   the ENTIRE sequence must be in ascending salary order
+→ part-r-00000 contains the LOWEST salaries
+→ part-r-00099 contains the HIGHEST salaries
+
+THE PROBLEM:
+→ You run a standard MapReduce sort with 100 reducers
+→ Each reducer's output IS sorted internally
+→ BUT part-r-00000 might contain salaries 10K-500K
+   AND part-r-00050 might ALSO contain salaries 15K-480K
+→ The files OVERLAP — concatenation is NOT globally sorted
+
+WHY THIS HAPPENS:
+→ HashPartitioner (Project 10) distributes keys by hash
+→ hash("42000") % 100 might send to reducer 7
+→ hash("43000") % 100 might send to reducer 92
+→ There is NO salary-range-based partitioning
+→ Global sort is BROKEN by default</code></pre></div>
+<hr>
+<h2>🔍 HOW TO APPROACH IT</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>STEP 1: Understand what "sorted" means in MapReduce
+</span>
+  ┌────────────────────────────────────────────────────────────┐
+  │           DEFAULT MapReduce SORTING BEHAVIOR               │
+  ├────────────────────────────────────────────────────────────┤
+  │                                                            │
+  │  WITHIN each reducer → keys ARE sorted (guaranteed)        │
+  │  ACROSS reducers     → keys are NOT sorted (random hash)   │
+  │                                                            │
+  │  Reducer 0 output: [12K, 45K, 89K, 310K, 500K]           │
+  │  Reducer 1 output: [8K, 22K, 77K, 290K, 410K]            │
+  │  Reducer 2 output: [15K, 50K, 120K, 340K, 480K]          │
+  │                                                            │
+  │  Concatenated: 12K,45K,89K,310K,500K,8K,22K...           │
+  │  ❌ NOT globally sorted                                    │
+  └────────────────────────────────────────────────────────────┘
+
+STEP 2: Understand what GLOBAL sort requires
+
+  ┌────────────────────────────────────────────────────────────┐
+  │           REQUIRED: RANGE-BASED PARTITIONING               │
+  ├────────────────────────────────────────────────────────────┤
+  │                                                            │
+  │  Reducer 0 handles: salaries     0 -  50,000              │
+  │  Reducer 1 handles: salaries 50,001 - 100,000             │
+  │  Reducer 2 handles: salaries 100,001 - 500,000            │
+  │                                                            │
+  │  Reducer 0 output: [8K, 12K, 15K, 22K, 42K, 45K, 50K]   │
+  │  Reducer 1 output: [65K, 77K, 78K, 89K]                  │
+  │  Reducer 2 output: [120K, 290K, 310K, 340K, 410K, 500K]  │
+  │                                                            │
+  │  Concatenated: 8K,12K,15K,...,65K,77K,...,120K,290K...    │
+  │  ✅ GLOBALLY sorted                                        │
+  └────────────────────────────────────────────────────────────┘
+
+STEP 3: The critical question
+
+  HOW do we determine the range boundaries?
+  → We DON'T know the salary distribution in advance
+  → If most salaries are 30K-80K and we split evenly 0-500K,
+    reducer 0 gets 90% of data (SKEW — see Project 33 preview)
+  → We need to SAMPLE the data first to find good split points
+  → THIS is exactly what TotalOrderPartitioner + InputSampler does</code></pre></div>
+<hr>
+<h2>💡 HOW CAN WE SOLVE IT</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>HADOOP PROVIDES A BUILT-IN SOLUTION — THREE COMPONENTS:
+</span>
+┌─────────────────────────────────────────────────────────────────┐
+│                 GLOBAL SORT MECHANISM                            │
+│                                                                  │
+│  COMPONENT 1: InputSampler                                      │
+│  → Reads a SAMPLE of records from input data                    │
+│  → Determines partition boundaries from the sample              │
+│  → Writes boundaries to a "partition file"                      │
+│                                                                  │
+│  COMPONENT 2: TotalOrderPartitioner                             │
+│  → Reads the partition file at job startup                      │
+│  → For each map output key, uses BINARY SEARCH                  │
+│    on the boundaries to determine which reducer gets it         │
+│  → Replaces HashPartitioner (Project 10)                        │
+│                                                                  │
+│  COMPONENT 3: Standard MapReduce Sort                           │
+│  → Each reducer receives a non-overlapping range of keys        │
+│  → Each reducer sorts its range internally (default behavior)   │
+│  → Result: GLOBAL SORT across all output files                  │
+└─────────────────────────────────────────────────────────────────┘
+
+THE FLOW:
+
+  ┌──────────┐    sample     ┌──────────────┐    partition file
+  │  INPUT   │ ───────────→  │ InputSampler │ ───────────────→  _partition.lst
+  │  DATA    │               └──────────────┘                        │
+  └────┬─────┘                                                       │
+       │                                                             ▼
+       │              ┌──────────────────────────────────────────────────┐
+       │              │           TotalOrderPartitioner                  │
+       │              │  reads _partition.lst at startup                 │
+       │              │  boundaries: [50000, 100000, 200000]            │
+       │              │                                                  │
+       └──────────────│  key &lt; 50000       → Reducer 0                  │
+                      │  50000 ≤ key &lt; 100000 → Reducer 1              │
+                      │  100000 ≤ key &lt; 200000 → Reducer 2             │
+                      │  key ≥ 200000      → Reducer 3                  │
+                      └──────────────────────────────────────────────────┘</code></pre></div>
+<hr>
+<h2>✅ WHAT SHOULD DO</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>1. UNDERSTAND THE THREE SAMPLING STRATEGIES
+</span>
+   InputSampler provides THREE built-in samplers:
+
+   ┌────────────────────────────────────────────────────────────────┐
+   │ SAMPLER            │ HOW IT WORKS            │ WHEN TO USE     │
+   ├────────────────────┼─────────────────────────┼─────────────────┤
+   │ RandomSampler      │ Reads random records    │ General purpose │
+   │ (freq, numSamples, │ with given probability  │ Most common     │
+   │  maxSplits)        │ from random splits      │                 │
+   ├────────────────────┼─────────────────────────┼─────────────────┤
+   │ IntervalSampler    │ Reads records at fixed  │ Already roughly │
+   │ (freq, maxSplits)  │ intervals from splits   │ sorted data     │
+   ├────────────────────┼─────────────────────────┼─────────────────┤
+   │ SplitSampler       │ Reads first N records   │ Quick &amp; dirty   │
+   │ (numSamples,       │ from first M splits     │ Testing only    │
+   │  maxSplits)        │                         │                 │
+   └────────────────────┴─────────────────────────┴─────────────────┘
+
+   → RandomSampler is the SAFEST choice for unknown distributions
+   → It gives the most representative partition boundaries
+
+2. CHOOSE NUMBER OF REDUCERS WISELY
+   → More reducers = more output files = finer-grained sort
+   → But also more overhead and more partition boundaries needed
+   → RULE: numReducers should produce output files of 1-4GB each
+   → 85M records × ~60 bytes each ≈ 5GB → 2-5 reducers sufficient
+   → For 500GB data → 100-200 reducers
+
+3. ENSURE THE SORT KEY IS THE MAP OUTPUT KEY
+   → TotalOrderPartitioner partitions based on MAP OUTPUT KEY
+   → If you want to sort by salary, salary MUST be the key
+   → Use an identity mapper that re-keys records by salary
+
+4. USE DISTRIBUTED CACHE FOR THE PARTITION FILE
+   → TotalOrderPartitioner reads partition file from Distributed Cache
+     (covered in Project 15)
+   → InputSampler.writePartitionFile() handles this automatically</code></pre></div>
+<hr>
+<h2>🚫 WHAT SHOULD NOT DO</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>1. DO NOT hard-code partition boundaries
+</span>   → Salary distributions change over time
+   → What works today creates massive skew tomorrow
+   → ALWAYS sample — let the data tell you the boundaries
+
+2. DO NOT use TotalOrderPartitioner with too few samples
+   → If you sample 10 records from 85 million
+   → Boundaries will be wildly inaccurate
+   → RULE: Sample at least 10 × numReducers records
+   → For 100 reducers → sample at least 1000 records
+   → RandomSampler(0.001, 10000, 100) is a safe starting point
+
+3. DO NOT confuse TotalOrderPartitioner with Secondary Sort (Project 19)
+   → TotalOrderPartitioner: Global sort by ONE key across reducers
+   → Secondary Sort: Sort by primary key THEN sub-sort by secondary key
+   → They solve DIFFERENT problems — can be combined but separately
+
+4. DO NOT forget that the sort key type must be WritableComparable
+   → IntWritable, LongWritable, Text all implement it (Project 5)
+   → Custom keys must implement compareTo() (Project 13)
+   → TotalOrderPartitioner uses binary search — needs comparable keys
+
+5. DO NOT skip the sampling step and use a uniform range
+   → Salaries are NOT uniformly distributed
+   → Most cluster between 30K-120K
+   → Uniform split [0-100K, 100K-200K, ...] creates extreme skew
+   → Reducer 0 gets 80% of data, others nearly empty</code></pre></div>
+<hr>
+<h2>🔀 WHEN TO USE WHAT</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>┌────────────────────────────────┬────────────────────────────────┐
+</span>│ NEED                           │ SOLUTION                       │
+├────────────────────────────────┼────────────────────────────────┤
+│ Sort within each reducer only  │ Default behavior — do nothing  │
+│ (local sort)                   │ (HashPartitioner from Proj 10) │
+├────────────────────────────────┼────────────────────────────────┤
+│ Global sort across ALL output  │ TotalOrderPartitioner +        │
+│ files by a single key          │ InputSampler (THIS project)    │
+├────────────────────────────────┼────────────────────────────────┤
+│ Sort by primary key, then      │ Secondary Sort                 │
+│ sub-sort by secondary key      │ (Project 19 — NEXT)            │
+├────────────────────────────────┼────────────────────────────────┤
+│ Distribute keys to specific    │ Custom Partitioner             │
+│ reducers by business logic     │ (Project 10)                   │
+├────────────────────────────────┼────────────────────────────────┤
+│ Global sort on small dataset   │ Single reducer (numReducers=1) │
+│ (fits in one reducer)          │ Simplest approach              │
+├────────────────────────────────┼────────────────────────────────┤
+│ Global sort + enrichment with  │ TotalOrderPartitioner +        │
+│ joined data                    │ Reduce-Side Join (Proj 17)     │
+│                                │ in a chained pipeline          │
+├────────────────────────────────┼────────────────────────────────┤
+│ Sort in Hive/Pig instead       │ ORDER BY (Hive — Proj 24)     │
+│ of raw MapReduce               │ ORDER (Pig — Proj 26)          │
+└────────────────────────────────┴────────────────────────────────┘</code></pre></div>
+<hr>
+<h2>🚫 WHEN NOT TO USE</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>1. SMALL DATA THAT FITS IN ONE REDUCER
+</span>   → If 85 million records fit in a single reducer's memory/disk
+   → Just use 1 reducer — output is automatically globally sorted
+   → TotalOrderPartitioner overhead is unnecessary
+
+2. WHEN YOU ONLY NEED TOP-N RESULTS
+   → Sorting 85 million records to get top 10 highest salaries
+   → WASTE — use a priority queue in mapper + single reducer
+   → Global sort is O(N log N) — Top-N is O(N log K) where K=10
+
+3. WHEN DOWNSTREAM ONLY READS ONE PARTITION AT A TIME
+   → If consumers always query "salaries between 50K-60K"
+   → Partitioning by range is useful but FULL SORT is unnecessary
+   → Use a Custom Partitioner (Project 10) with known ranges
+
+4. WHEN DATA IS ALREADY SORTED
+   → If input comes from a previous global sort job
+   → Re-sorting is pure waste of cluster resources
+
+5. REAL-TIME SORTING NEEDS
+   → TotalOrderPartitioner is a BATCH operation
+   → Takes minutes to hours depending on data size
+   → For real-time sorted views → use HBase (Project 27) row key design</code></pre></div>
+<hr>
+<h2>⚙️ HOW IT ONLY WORKS — INTERNAL MECHANICS</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>═══════════════════════════════════════════════════════════════
+</span>INTERNAL MECHANIC 1: HOW InputSampler WORKS
+═══════════════════════════════════════════════════════════════
+
+Given: 85 million salary records, 4 reducers needed
+Using: RandomSampler(probability=0.0001, maxSamples=10000, maxSplits=50)
+
+STEP A — Select which input splits to sample
+  → Input has 200 splits (200 blocks of 128MB each)
+  → maxSplits=50 → randomly pick 50 of the 200 splits
+
+STEP B — Sample records from selected splits
+  → For each of the 50 splits:
+    → Read each record
+    → With probability 0.0001 (1 in 10,000), keep the record
+    → Stop when maxSamples (10000) total records collected
+  
+  → Result: ~10000 salary values sampled
+  
+  Sample: [42000, 78000, 65000, 31000, 155000, 42500, 88000, ...]
+
+STEP C — Sort the samples
+  → Sort all 10000 sampled values:
+  [12000, 12500, 13000, ..., 42000, 42500, ..., 155000, ..., 890000]
+
+STEP D — Pick partition boundaries
+  → Need 4 reducers → need 3 boundaries (N-1 boundaries for N reducers)
+  → Divide sorted samples into 4 equal segments
+  → Boundaries at indices: 2500, 5000, 7500
+  
+  samples[2500]  = 45000   → boundary 1
+  samples[5000]  = 72000   → boundary 2
+  samples[7500]  = 125000  → boundary 3
+
+STEP E — Write partition file
+  → Serialize boundaries to a SequenceFile: _partition.lst
+  → Place in HDFS and add to Distributed Cache (Project 15)
+
+  _partition.lst contains:
+  ┌──────────────────────────┐
+  │ Key[0]: IntWritable(45000)  │
+  │ Key[1]: IntWritable(72000)  │
+  │ Key[2]: IntWritable(125000) │
+  └──────────────────────────┘
+
+═══════════════════════════════════════════════════════════════
+INTERNAL MECHANIC 2: HOW TotalOrderPartitioner WORKS AT RUNTIME
+═══════════════════════════════════════════════════════════════
+
+At Job Start:
+  → TotalOrderPartitioner reads _partition.lst from Distributed Cache
+  → Loads boundaries into a TRIE or sorted array for fast lookup
+  → This happens ONCE per mapper JVM
+
+For EVERY map output key-value pair:
+  → getPartition(key, value, numReducers) is called
+  → Performs BINARY SEARCH on boundaries array
+
+  Example key: salary = 68000
+
+  Boundaries: [45000, 72000, 125000]
+  
+  Binary search:
+    → 68000 &lt; 125000? YES → go left
+    → 68000 &lt; 72000?  YES → go left  
+    → 68000 &lt; 45000?  NO  → partition index = 1
+  
+  Result: partition 1 (second reducer)
+
+  ┌───────────────────────────────────────────────────────────┐
+  │  PARTITION ASSIGNMENT:                                     │
+  │                                                            │
+  │  salary &lt; 45000          → Reducer 0  (part-r-00000)      │
+  │  45000 ≤ salary &lt; 72000  → Reducer 1  (part-r-00001)      │
+  │  72000 ≤ salary &lt; 125000 → Reducer 2  (part-r-00002)      │
+  │  salary ≥ 125000         → Reducer 3  (part-r-00003)      │
+  │                                                            │
+  │  Each reducer sorts its range internally (default)         │
+  │  Concatenation: part-r-00000 + 00001 + 00002 + 00003     │
+  │  = GLOBALLY SORTED                                         │
+  └───────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════
+INTERNAL MECHANIC 3: WHY BINARY SEARCH MATTERS
+═══════════════════════════════════════════════════════════════
+
+  → With 1000 reducers → 999 boundaries
+  → HashPartitioner: O(1) — just hash % numReducers
+  → TotalOrderPartitioner: O(log 999) ≈ 10 comparisons per record
+  → For 85 million records: 850 million comparisons
+  → Still fast because comparisons are cheap integer operations
+  
+  → For Text keys: TotalOrderPartitioner builds a TRIE
+    (prefix tree) for even faster lookups than binary search
+  → Trie lookup: O(key_length) instead of O(log N × key_length)
+
+═══════════════════════════════════════════════════════════════
+INTERNAL MECHANIC 4: THE COMPLETE DATA FLOW
+═══════════════════════════════════════════════════════════════
+
+  ┌─────────┐                              ┌─────────────────┐
+  │  INPUT  │                              │  PARTITION FILE  │
+  │ (HDFS)  │                              │ (_partition.lst) │
+  └────┬────┘                              └────────┬────────┘
+       │                                            │
+       ▼                                            │
+  ┌─────────────────────────────┐                   │
+  │      MAPPER (Identity)      │                   │
+  │  Input:  line of text       │                   │
+  │  Output: (salary, line)     │                   │
+  │  Re-keys record by salary   │                   │
+  └──────────────┬──────────────┘                   │
+                 │                                   │
+                 ▼                                   ▼
+  ┌──────────────────────────────────────────────────────────┐
+  │              TotalOrderPartitioner                        │
+  │  Binary search on boundaries from partition file          │
+  │  Assigns each (salary, line) to correct reducer           │
+  └──────────────┬──────────┬──────────┬──────────┬─────────┘
+                 │          │          │          │
+                 ▼          ▼          ▼          ▼
+           ┌─────────┐┌─────────┐┌─────────┐┌─────────┐
+           │Reducer 0││Reducer 1││Reducer 2││Reducer 3│
+           │ &lt;45K    ││ 45K-72K ││72K-125K ││ ≥125K   │
+           │ sorted  ││ sorted  ││ sorted  ││ sorted  │
+           └────┬────┘└────┬────┘└────┬────┘└────┬────┘
+                │          │          │          │
+                ▼          ▼          ▼          ▼
+           part-r-00000  part-r-00001  part-r-00002  part-r-00003
+           [12K..44K]   [45K..71K]   [72K..124K]   [125K..890K]
+
+           CONCATENATION = GLOBALLY SORTED ✅</code></pre></div>
+<hr>
+<h2>⚠️ COMMON PITFALLS AND FAILURE MODES</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>PITFALL 1: "Partition file not found" error at runtime
+</span>→ CAUSE: InputSampler.writePartitionFile() was not called before job.submit()
+→ OR: The partition file path in TotalOrderPartitioner.setPartitionFile()
+      does not match where writePartitionFile() wrote it
+→ FIX: Always call writePartitionFile() AFTER setting job configuration
+       and BEFORE job.waitForCompletion()
+
+PITFALL 2: Extreme data skew despite using TotalOrderPartitioner
+→ CAUSE: Too few samples for highly skewed distribution
+→ EXAMPLE: 80% of salaries are between 40K-80K
+           Sampling only 100 records might miss the tail distribution
+→ FIX: Increase sample size — RandomSampler(0.001, 100000, 100)
+→ ALSO: If one salary value has millions of duplicates,
+        no partitioning can split WITHIN that value
+        (all identical keys MUST go to same reducer)
+
+PITFALL 3: Output files have wildly different sizes
+→ CAUSE: Data distribution is not uniform and sample was too small
+→ DIAGNOSIS: Check each part-r-NNNNN file size
+→ FIX: Increase samples, or use more reducers to make ranges narrower
+
+PITFALL 4: "Key type mismatch" ClassCastException
+→ CAUSE: TotalOrderPartitioner expects map output key type
+         to match the type used during sampling
+→ If you sampled with IntWritable but mapper outputs LongWritable → CRASH
+→ FIX: Ensure map output key class matches across sampler and mapper
+
+PITFALL 5: Sorting by salary but salary is embedded in a Text line
+→ CAUSE: If key is Text("42000"), sorting is LEXICOGRAPHIC not numeric
+→ "9000" &gt; "80000" because "9" &gt; "8" in ASCII
+→ FIX: Use IntWritable or LongWritable as map output key
+→ OR: Pad with leading zeros — Text("0042000") sorts correctly
+       but this is fragile — prefer numeric Writable types
+
+PITFALL 6: Partition file generated on different data than actual input
+→ CAUSE: You sampled dataset A but ran the sort job on dataset B
+→ Boundaries make no sense for the actual data
+→ FIX: ALWAYS sample from the SAME input path the job will process</code></pre></div>
+<hr>
+<h2>📈 SCALABILITY CONSIDERATIONS</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>SCALING DIMENSION 1: NUMBER OF RECORDS
+</span>
+  ┌──────────────────┬───────────┬────────────────────────────────┐
+  │ Records          │ Reducers  │ Sampling Recommendation        │
+  ├──────────────────┼───────────┼────────────────────────────────┤
+  │ 1 million        │ 2-5       │ RandomSampler(0.01, 5000, 10)  │
+  │ 100 million      │ 10-50     │ RandomSampler(0.001, 50000, 50)│
+  │ 1 billion        │ 50-200    │ RandomSampler(0.0001,100000,100│
+  │ 10 billion       │ 200-1000  │ RandomSampler(0.00001,500000,  │
+  │                  │           │                          200)   │
+  └──────────────────┴───────────┴────────────────────────────────┘
+
+SCALING DIMENSION 2: SAMPLING OVERHEAD
+
+  → Sampling reads a FRACTION of total data
+  → RandomSampler(0.0001, ...) reads 0.01% of records
+  → For 10TB input: samples ~1GB worth of data
+  → Sampling is a SEPARATE pass over the data (adds time)
+  → But it's much faster than the actual sort job
+
+SCALING DIMENSION 3: PARTITION FILE SIZE
+
+  → Partition file contains (numReducers - 1) keys
+  → 1000 reducers → 999 keys → tiny file (few KB)
+  → Loaded into memory on EVERY mapper → negligible overhead
+  → NOT a scaling concern
+
+SCALING DIMENSION 4: BINARY SEARCH COST
+
+  → O(log numReducers) per record
+  → 1000 reducers → ~10 comparisons per record
+  → 10 billion records → 100 billion comparisons
+  → Integer comparison: ~1 nanosecond each
+  → Total: ~100 seconds of pure partition computation
+  → Dwarfed by I/O time — NOT a bottleneck
+
+SCALING DIMENSION 5: THE REAL BOTTLENECK — SHUFFLE
+
+  → Global sort requires ALL data to move through shuffle
+  → 10TB input → up to 10TB network transfer during shuffle
+  → THIS is where most time is spent
+  → Mitigation: Use Combiner (Project 9) if applicable
+    (not always applicable for sort — depends on whether
+     you're aggregating or just reordering)
+  → Mitigation: Compression (Project 14) on map output
+    reduces shuffle data volume significantly</code></pre></div>
+<hr>
+<h2>🔍 INTERPRETABILITY CONSIDERATIONS</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>HOW TO VERIFY YOUR GLOBAL SORT IS CORRECT:
+</span>
+1. CHECK OUTPUT FILE SIZES — should be roughly equal
+   hdfs dfs -ls -h /output/sorted/
+   → part-r-00000: ~1.2GB
+   → part-r-00001: ~1.3GB
+   → part-r-00002: ~1.1GB
+   → part-r-00003: ~1.4GB
+   → Roughly balanced = good sampling
+
+2. CHECK BOUNDARY VALUES — first/last record of each file
+   hdfs dfs -cat /output/sorted/part-r-00000 | head -1
+   → Should show LOWEST salary in entire dataset
+   
+   hdfs dfs -cat /output/sorted/part-r-00000 | tail -1
+   → Should be LESS THAN first record of part-r-00001
+   
+   hdfs dfs -cat /output/sorted/part-r-00001 | head -1
+   → Should be GREATER THAN OR EQUAL to last of part-r-00000
+
+3. CHECK JOB COUNTERS for data distribution
+   → Map output records: should equal input records (identity mapper)
+   → Per-reducer record counts: visible in YARN UI
+   → Large imbalance indicates poor sampling
+
+4. SAMPLING DIAGNOSTICS
+   → Log the sampled boundaries before submitting job:
+     Read _partition.lst and print boundary values
+   → Verify boundaries match your expectation of data distribution
+   → Example: If you KNOW most salaries are 30K-120K,
+     boundaries should cluster in that range, not be uniform 0-500K</code></pre></div>
+<hr>
+<h2>💻 COMPLETE WORKING CODE</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ══════════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// FILE: SalaryGlobalSort.java</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// PURPOSE: Globally sort 85M employee records by salary using</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//          TotalOrderPartitioner + InputSampler</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// BUILDS ON: Project 10 (Custom Partitioner), Project 17 (Join output)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ══════════════════════════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">conf</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">Configuration</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">conf</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">Configured</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">fs</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">Path</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">io</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">IntWritable</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">io</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">LongWritable</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">io</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">NullWritable</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">io</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">Text</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">mapreduce</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">Job</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">mapreduce</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">Mapper</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">mapreduce</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">Reducer</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">mapreduce</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">lib</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">input</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">FileInputFormat</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">mapreduce</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">lib</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">input</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">TextInputFormat</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">mapreduce</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">lib</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">output</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">FileOutputFormat</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">mapreduce</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">lib</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">output</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">TextOutputFormat</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">mapreduce</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">lib</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">partition</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">InputSampler</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">mapreduce</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">lib</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">partition</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">TotalOrderPartitioner</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">util</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">Tool</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">org</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">apache</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">hadoop</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">util</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">ToolRunner</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> </span><span class="token">java</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token">io</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">IOException</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 0, 255);">public</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">class</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">SalaryGlobalSort</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">extends</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Configured</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">implements</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Tool</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span>
+<span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ══════════════════════════════════════════════════════════</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// MAPPER: Re-key each record by salary (the sort field)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ══════════════════════════════════════════════════════════</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Input line format:</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   E00001 | Maria Santos | Brazil | Engineering | 42000</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Map output:</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   KEY = IntWritable(42000)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   VALUE = Text("E00001 | Maria Santos | Brazil | Engineering | 42000")</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// WHY: TotalOrderPartitioner partitions by MAP OUTPUT KEY</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//      So the sort field MUST become the key</span><span>
+</span>
+<span>    </span><span class="token" style="color: rgb(0, 0, 255);">public</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">static</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">class</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">SalaryKeyMapper</span><span>
+</span><span>            </span><span class="token" style="color: rgb(0, 0, 255);">extends</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Mapper</span><span class="token generics" style="color: rgb(57, 58, 52);">&lt;</span><span class="token generics" style="color: rgb(43, 145, 175);">LongWritable</span><span class="token generics" style="color: rgb(57, 58, 52);">,</span><span class="token generics"> </span><span class="token generics" style="color: rgb(43, 145, 175);">Text</span><span class="token generics" style="color: rgb(57, 58, 52);">,</span><span class="token generics"> </span><span class="token generics" style="color: rgb(43, 145, 175);">IntWritable</span><span class="token generics" style="color: rgb(57, 58, 52);">,</span><span class="token generics"> </span><span class="token generics" style="color: rgb(43, 145, 175);">Text</span><span class="token generics" style="color: rgb(57, 58, 52);">&gt;</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 0, 255);">private</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">IntWritable</span><span> salaryKey </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">new</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">IntWritable</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>        </span><span class="token annotation" style="color: rgb(57, 58, 52);">@Override</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">protected</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">void</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">map</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">LongWritable</span><span> offset</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Text</span><span> line</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Context</span><span> context</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 0, 255);">throws</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">IOException</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">InterruptedException</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span>
+<span>            </span><span class="token" style="color: rgb(43, 145, 175);">String</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">record</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> line</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">toString</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">trim</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>            </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Skip empty lines and headers</span><span>
+</span><span>            </span><span class="token" style="color: rgb(0, 0, 255);">if</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(0, 0, 255);">record</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">isEmpty</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">||</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">record</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">startsWith</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"EMP_ID"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 0, 255);">return</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span>
+<span>            </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Parse salary from last field</span><span>
+</span><span>            </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Format: EMP_ID | NAME | COUNTRY | DEPARTMENT | SALARY</span><span>
+</span><span>            </span><span class="token" style="color: rgb(43, 145, 175);">String</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span> fields </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">record</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">split</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"\\|"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>            </span><span class="token" style="color: rgb(0, 0, 255);">if</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>fields</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>length </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">5</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Malformed record — skip</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Counter for debugging (Project 7)</span><span>
+</span><span>                context</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">getCounter</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"QUALITY"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"MALFORMED_RECORDS"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">increment</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 0, 255);">return</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span>
+<span>            </span><span class="token" style="color: rgb(0, 0, 255);">try</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 0, 255);">int</span><span> salary </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Integer</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">parseInt</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>fields</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(54, 172, 170);">4</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">trim</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>                salaryKey</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">set</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>salary</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>                </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Emit salary as KEY, entire record as VALUE</span><span>
+</span><span>                context</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">write</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>salaryKey</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> line</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>                context</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">getCounter</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"QUALITY"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"VALID_RECORDS"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">increment</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">catch</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">NumberFormatException</span><span> e</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span><span>                context</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">getCounter</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"QUALITY"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"BAD_SALARY_FORMAT"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">increment</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span>
+<span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ══════════════════════════════════════════════════════════</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// REDUCER: Identity — just output records in sorted order</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ══════════════════════════════════════════════════════════</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Within each reducer, keys arrive SORTED (default behavior)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// TotalOrderPartitioner ensures non-overlapping ranges</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// So we just emit each record as-is</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Output:</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   KEY = Text("E00001 | Maria Santos | Brazil | Engineering | 42000")</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   VALUE = NullWritable (we don't need a separate value)</span><span>
+</span>
+<span>    </span><span class="token" style="color: rgb(0, 0, 255);">public</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">static</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">class</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">SortedOutputReducer</span><span>
+</span><span>            </span><span class="token" style="color: rgb(0, 0, 255);">extends</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Reducer</span><span class="token generics" style="color: rgb(57, 58, 52);">&lt;</span><span class="token generics" style="color: rgb(43, 145, 175);">IntWritable</span><span class="token generics" style="color: rgb(57, 58, 52);">,</span><span class="token generics"> </span><span class="token generics" style="color: rgb(43, 145, 175);">Text</span><span class="token generics" style="color: rgb(57, 58, 52);">,</span><span class="token generics"> </span><span class="token generics" style="color: rgb(43, 145, 175);">Text</span><span class="token generics" style="color: rgb(57, 58, 52);">,</span><span class="token generics"> </span><span class="token generics" style="color: rgb(43, 145, 175);">NullWritable</span><span class="token generics" style="color: rgb(57, 58, 52);">&gt;</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span>
+<span>        </span><span class="token annotation" style="color: rgb(57, 58, 52);">@Override</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">protected</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">void</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">reduce</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">IntWritable</span><span> salaryKey</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Iterable</span><span class="token generics" style="color: rgb(57, 58, 52);">&lt;</span><span class="token generics" style="color: rgb(43, 145, 175);">Text</span><span class="token generics" style="color: rgb(57, 58, 52);">&gt;</span><span> records</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>                              </span><span class="token" style="color: rgb(43, 145, 175);">Context</span><span> context</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>                </span><span class="token" style="color: rgb(0, 0, 255);">throws</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">IOException</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">InterruptedException</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span>
+<span>            </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Multiple employees can have the SAME salary</span><span>
+</span><span>            </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Emit all of them — they are correctly grouped</span><span>
+</span><span>            </span><span class="token" style="color: rgb(0, 0, 255);">for</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">Text</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">record</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">:</span><span> records</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span><span>                context</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">write</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(0, 0, 255);">record</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">NullWritable</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">get</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span>
+<span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ══════════════════════════════════════════════════════════</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// DRIVER: Wire everything together</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ══════════════════════════════════════════════════════════</span><span>
+</span>
+<span>    </span><span class="token annotation" style="color: rgb(57, 58, 52);">@Override</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">public</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">int</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">run</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">String</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span> args</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">throws</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Exception</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 0, 255);">if</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>args</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>length </span><span class="token" style="color: rgb(57, 58, 52);">!=</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">3</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span><span>            </span><span class="token" style="color: rgb(43, 145, 175);">System</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>err</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">println</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>
+</span><span>                </span><span class="token" style="color: rgb(163, 21, 21);">"Usage: SalaryGlobalSort &lt;input_path&gt; &lt;output_path&gt; &lt;num_reducers&gt;"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            </span><span class="token" style="color: rgb(43, 145, 175);">System</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>err</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">println</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>
+</span><span>                </span><span class="token" style="color: rgb(163, 21, 21);">"Example: SalaryGlobalSort /data/employees /output/sorted 4"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            </span><span class="token" style="color: rgb(0, 0, 255);">return</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">-</span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(43, 145, 175);">String</span><span> inputPath </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> args</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(54, 172, 170);">0</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(43, 145, 175);">String</span><span> outputPath </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> args</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">int</span><span> numReducers </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Integer</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">parseInt</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>args</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(54, 172, 170);">2</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(43, 145, 175);">Configuration</span><span> conf </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">getConf</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ── STEP 1: Create and configure the job ──</span><span>
+</span><span>        </span><span class="token" style="color: rgb(43, 145, 175);">Job</span><span> job </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">getInstance</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>conf</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"Global Sort - Employee Salaries"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>        job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">setJarByClass</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">SalaryGlobalSort</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(0, 0, 255);">class</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Mapper and Reducer</span><span>
+</span><span>        job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">setMapperClass</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">SalaryKeyMapper</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(0, 0, 255);">class</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>        job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">setReducerClass</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">SortedOutputReducer</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(0, 0, 255);">class</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Map output types (what flows through shuffle)</span><span>
+</span><span>        job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">setMapOutputKeyClass</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">IntWritable</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(0, 0, 255);">class</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>        job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">setMapOutputValueClass</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">Text</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(0, 0, 255);">class</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Final output types</span><span>
+</span><span>        job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">setOutputKeyClass</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">Text</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(0, 0, 255);">class</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>        job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">setOutputValueClass</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">NullWritable</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(0, 0, 255);">class</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Input/Output formats</span><span>
+</span><span>        job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">setInputFormatClass</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">TextInputFormat</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(0, 0, 255);">class</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>        job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">setOutputFormatClass</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">TextOutputFormat</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(0, 0, 255);">class</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Paths</span><span>
+</span><span>        </span><span class="token" style="color: rgb(43, 145, 175);">FileInputFormat</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">addInputPath</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>job</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">new</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Path</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>inputPath</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(43, 145, 175);">FileOutputFormat</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">setOutputPath</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>job</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">new</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Path</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>outputPath</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Number of reducers</span><span>
+</span><span>        job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">setNumReduceTasks</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>numReducers</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ── STEP 2: Set TotalOrderPartitioner ──</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// This REPLACES the default HashPartitioner (Project 10)</span><span>
+</span><span>        job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">setPartitionerClass</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">TotalOrderPartitioner</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(0, 0, 255);">class</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ── STEP 3: Configure partition file path ──</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// TotalOrderPartitioner needs to know WHERE to read boundaries</span><span>
+</span><span>        </span><span class="token" style="color: rgb(43, 145, 175);">Path</span><span> partitionFile </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">new</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Path</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>inputPath </span><span class="token" style="color: rgb(57, 58, 52);">+</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"/_partition.lst"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(43, 145, 175);">TotalOrderPartitioner</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">setPartitionFile</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>
+</span><span>            job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">getConfiguration</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> partitionFile</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ── STEP 4: Run InputSampler to create partition file ──</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// RandomSampler parameters:</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   freq = 0.001      → sample 0.1% of records</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   numSamples = 10000 → collect at most 10000 samples</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   maxSplits = 100    → sample from at most 100 input splits</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// WHY these values:</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   → 0.1% of 85M = 85K potential samples (capped at 10000)</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   → 10000 samples for 4 reducers = 2500 samples per boundary</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   → Statistically robust for most distributions</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(43, 145, 175);">System</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>out</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">println</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"=== PHASE 1: Sampling input data ==="</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(43, 145, 175);">System</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>out</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">println</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"Creating partition boundaries for "</span><span>
+</span><span>            </span><span class="token" style="color: rgb(57, 58, 52);">+</span><span> numReducers </span><span class="token" style="color: rgb(57, 58, 52);">+</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">" reducers..."</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(43, 145, 175);">InputSampler</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">Sampler</span><span class="token generics" style="color: rgb(57, 58, 52);">&lt;</span><span class="token generics" style="color: rgb(43, 145, 175);">IntWritable</span><span class="token generics" style="color: rgb(57, 58, 52);">,</span><span class="token generics"> </span><span class="token generics" style="color: rgb(43, 145, 175);">Text</span><span class="token generics" style="color: rgb(57, 58, 52);">&gt;</span><span> sampler </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span>
+</span><span>            </span><span class="token" style="color: rgb(0, 0, 255);">new</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">InputSampler</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(43, 145, 175);">RandomSampler</span><span class="token generics" style="color: rgb(57, 58, 52);">&lt;</span><span class="token generics" style="color: rgb(57, 58, 52);">&gt;</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(54, 172, 170);">0.001</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">10000</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">100</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// THIS is the critical call:</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// - Reads samples from input</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// - Sorts them</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// - Picks (numReducers - 1) evenly spaced boundaries</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// - Writes boundaries to partitionFile in HDFS</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// - Adds partitionFile to DistributedCache automatically</span><span>
+</span><span>        </span><span class="token" style="color: rgb(43, 145, 175);">InputSampler</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">writePartitionFile</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>job</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> sampler</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(43, 145, 175);">System</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>out</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">println</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"Partition file written to: "</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">+</span><span> partitionFile</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(43, 145, 175);">System</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>out</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">println</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"=== PHASE 2: Running global sort job ==="</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ── STEP 5: Submit the job ──</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">boolean</span><span> success </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> job</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">waitForCompletion</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(54, 172, 170);">true</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 0, 255);">if</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>success</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span><span>            </span><span class="token" style="color: rgb(43, 145, 175);">System</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>out</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">println</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"=== GLOBAL SORT COMPLETE ==="</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            </span><span class="token" style="color: rgb(43, 145, 175);">System</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>out</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">println</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"Output: "</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">+</span><span> outputPath</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            </span><span class="token" style="color: rgb(43, 145, 175);">System</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>out</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">println</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"Files part-r-00000 through part-r-"</span><span>
+</span><span>                </span><span class="token" style="color: rgb(57, 58, 52);">+</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">String</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">format</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"%05d"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> numReducers </span><span class="token" style="color: rgb(57, 58, 52);">-</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>                </span><span class="token" style="color: rgb(57, 58, 52);">+</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">" are globally sorted by salary"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>            </span><span class="token" style="color: rgb(43, 145, 175);">System</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>out</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">println</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"Concatenating them produces a fully "</span><span>
+</span><span>                </span><span class="token" style="color: rgb(57, 58, 52);">+</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"sorted dataset"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span>
+<span>        </span><span class="token" style="color: rgb(0, 0, 255);">return</span><span> success </span><span class="token" style="color: rgb(57, 58, 52);">?</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">0</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">:</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span>
+<span>    </span><span class="token" style="color: rgb(0, 0, 255);">public</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">static</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">void</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">main</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(43, 145, 175);">String</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span> args</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">throws</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Exception</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">int</span><span> exitCode </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">ToolRunner</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">run</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(0, 0, 255);">new</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">Configuration</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>            </span><span class="token" style="color: rgb(0, 0, 255);">new</span><span> </span><span class="token" style="color: rgb(43, 145, 175);">SalaryGlobalSort</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> args</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>        </span><span class="token" style="color: rgb(43, 145, 175);">System</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token" style="color: rgb(57, 58, 52);">exit</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>exitCode</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">}</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">}</span></code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># DATA GENERATION: Create test employee salary data</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(57, 58, 52);">cat</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span> generate_salary_data.py </span><span class="token" style="color: rgb(57, 58, 52);">&lt;&lt;</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'PYEOF'
+</span><span class="token" style="color: rgb(163, 21, 21);">import random
+</span><span class="token" style="color: rgb(163, 21, 21);">import sys
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);"># Generate realistic salary distribution
+</span><span class="token" style="color: rgb(163, 21, 21);"># Most salaries cluster between 30K-120K (normal distribution)
+</span><span class="token" style="color: rgb(163, 21, 21);"># Some outliers at 200K-900K (executives)
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">random.seed(42)
+</span><span class="token" style="color: rgb(163, 21, 21);">num_records = int(sys.argv[1]) if len(sys.argv) &gt; 1 else 100000
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">countries = ["USA", "Brazil", "Japan", "Germany", "India",
+</span><span class="token" style="color: rgb(163, 21, 21);">             "UK", "France", "Canada", "Australia", "Mexico"]
+</span><span class="token" style="color: rgb(163, 21, 21);">departments = ["Engineering", "Marketing", "Finance", "HR",
+</span><span class="token" style="color: rgb(163, 21, 21);">               "Sales", "Operations", "Legal", "Research"]
+</span><span class="token" style="color: rgb(163, 21, 21);">first_names = ["Maria", "John", "Akiko", "Hans", "Priya",
+</span><span class="token" style="color: rgb(163, 21, 21);">               "James", "Sophie", "Liam", "Yuki", "Carlos",
+</span><span class="token" style="color: rgb(163, 21, 21);">               "Emma", "Wei", "Anna", "Omar", "Sara"]
+</span><span class="token" style="color: rgb(163, 21, 21);">last_names = ["Santos", "Smith", "Tanaka", "Mueller", "Patel",
+</span><span class="token" style="color: rgb(163, 21, 21);">              "Johnson", "Dubois", "Wilson", "Sato", "Garcia",
+</span><span class="token" style="color: rgb(163, 21, 21);">              "Brown", "Chen", "Kowalski", "Ahmed", "Kim"]
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">print("EMP_ID | NAME | COUNTRY | DEPARTMENT | SALARY")
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">for i in range(num_records):
+</span><span class="token" style="color: rgb(163, 21, 21);">    emp_id = f"E{i+1:07d}"
+</span><span class="token" style="color: rgb(163, 21, 21);">    name = f"{random.choice(first_names)} {random.choice(last_names)}"
+</span><span class="token" style="color: rgb(163, 21, 21);">    country = random.choice(countries)
+</span><span class="token" style="color: rgb(163, 21, 21);">    dept = random.choice(departments)
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">    # 95% normal salaries, 5% executive salaries
+</span><span class="token" style="color: rgb(163, 21, 21);">    if random.random() &lt; 0.95:
+</span><span class="token" style="color: rgb(163, 21, 21);">        salary = int(random.gauss(65000, 25000))
+</span><span class="token" style="color: rgb(163, 21, 21);">        salary = max(15000, min(salary, 200000))
+</span><span class="token" style="color: rgb(163, 21, 21);">    else:
+</span><span class="token" style="color: rgb(163, 21, 21);">        salary = int(random.gauss(350000, 150000))
+</span><span class="token" style="color: rgb(163, 21, 21);">        salary = max(200001, min(salary, 900000))
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">    print(f"{emp_id} | {name} | {country} | {dept} | {salary}")
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">PYEOF</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Generate 500K records for testing</span><span>
+</span><span>python3 generate_salary_data.py </span><span class="token" style="color: rgb(54, 172, 170);">500000</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span> /tmp/employee_salaries.txt
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Check data characteristics</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"=== Data Preview ==="</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">head</span><span> -6 /tmp/employee_salaries.txt
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"=== Record Count ==="</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">wc</span><span> -l /tmp/employee_salaries.txt
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"=== Salary Distribution Sample ==="</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">tail</span><span> -n +2 /tmp/employee_salaries.txt </span><span class="token" style="color: rgb(57, 58, 52);">|</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">\</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">awk</span><span> -F</span><span class="token" style="color: rgb(163, 21, 21);">'|'</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'{print int($5/50000)*50000"-"(int($5/50000)+1)*50000}'</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">|</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">\</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">sort</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">|</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">uniq</span><span> -c </span><span class="token" style="color: rgb(57, 58, 52);">|</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">sort</span><span> -rn </span><span class="token" style="color: rgb(57, 58, 52);">|</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">head</span><span> -10</span></code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># UPLOAD DATA, COMPILE, AND RUN</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 1: Upload data to HDFS</span><span>
+</span>hdfs dfs -mkdir -p /data/employees
+hdfs dfs -put /tmp/employee_salaries.txt /data/employees/
+
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Verify upload</span><span>
+</span>hdfs dfs -ls -h /data/employees/
+<span>hdfs dfs -cat /data/employees/employee_salaries.txt </span><span class="token" style="color: rgb(57, 58, 52);">|</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">head</span><span> -5
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 2: Compile</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">export</span><span> </span><span class="token assign-left" style="color: rgb(54, 172, 170);">HADOOP_CLASSPATH</span><span class="token" style="color: rgb(57, 58, 52);">=</span><span class="token" style="color: rgb(54, 172, 170);">$(</span><span class="token" style="color: rgb(54, 172, 170);">hadoop classpath</span><span class="token" style="color: rgb(54, 172, 170);">)</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">mkdir</span><span> -p build
+</span>
+<span>javac -classpath </span><span class="token" style="color: rgb(54, 172, 170);">$HADOOP_CLASSPATH</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">\</span><span>
+</span><span>      -d build </span><span class="token" style="color: rgb(57, 58, 52);">\</span><span>
+</span>      SalaryGlobalSort.java
+
+<span>jar -cvf salary-sort.jar -C build/ </span><span class="token builtin" style="color: rgb(43, 145, 175);">.</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 3: Run with 4 reducers</span><span>
+</span><span>hadoop jar salary-sort.jar SalaryGlobalSort </span><span class="token" style="color: rgb(57, 58, 52);">\</span><span>
+</span><span>    /data/employees </span><span class="token" style="color: rgb(57, 58, 52);">\</span><span>
+</span><span>    /output/salary_sorted </span><span class="token" style="color: rgb(57, 58, 52);">\</span><span>
+</span><span>    </span><span class="token" style="color: rgb(54, 172, 170);">4</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Step 4: Verify global sort</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"=== OUTPUT FILES ==="</span><span>
+</span>hdfs dfs -ls -h /output/salary_sorted/
+
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"=== FIRST 3 RECORDS OF EACH FILE ==="</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">for</span><span> </span><span class="token for-or-select" style="color: rgb(54, 172, 170);">i</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">in</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">0</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">1</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">2</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">3</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">do</span><span>
+</span><span>    </span><span class="token assign-left" style="color: rgb(54, 172, 170);">FILE</span><span class="token" style="color: rgb(57, 58, 52);">=</span><span class="token" style="color: rgb(54, 172, 170);">$(</span><span class="token builtin" style="color: rgb(43, 145, 175);">printf</span><span class="token" style="color: rgb(54, 172, 170);"> </span><span class="token" style="color: rgb(163, 21, 21);">"part-r-%05d"</span><span class="token" style="color: rgb(54, 172, 170);"> $i</span><span class="token" style="color: rgb(54, 172, 170);">)</span><span>
+</span><span>    </span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"--- </span><span class="token" style="color: rgb(54, 172, 170);">$FILE</span><span class="token" style="color: rgb(163, 21, 21);"> ---"</span><span>
+</span><span>    hdfs dfs -cat /output/salary_sorted/</span><span class="token" style="color: rgb(54, 172, 170);">$FILE</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">|</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">head</span><span> -3
+</span><span>    </span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"  ..."</span><span>
+</span><span>    hdfs dfs -cat /output/salary_sorted/</span><span class="token" style="color: rgb(54, 172, 170);">$FILE</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">|</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">tail</span><span> -1
+</span><span>    </span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">done</span></code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># VERIFICATION SCRIPT: Prove the sort is truly global</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(57, 58, 52);">cat</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span> verify_global_sort.py </span><span class="token" style="color: rgb(57, 58, 52);">&lt;&lt;</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'PYEOF'
+</span><span class="token" style="color: rgb(163, 21, 21);">import subprocess
+</span><span class="token" style="color: rgb(163, 21, 21);">import sys
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">def get_hdfs_file_content(path):
+</span><span class="token" style="color: rgb(163, 21, 21);">    """Read HDFS file content via shell command."""
+</span><span class="token" style="color: rgb(163, 21, 21);">    result = subprocess.run(
+</span><span class="token" style="color: rgb(163, 21, 21);">        ["hdfs", "dfs", "-cat", path],
+</span><span class="token" style="color: rgb(163, 21, 21);">        capture_output=True, text=True
+</span><span class="token" style="color: rgb(163, 21, 21);">    )
+</span><span class="token" style="color: rgb(163, 21, 21);">    return result.stdout.strip().split('\n')
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">def extract_salary(line):
+</span><span class="token" style="color: rgb(163, 21, 21);">    """Extract salary from record line."""
+</span><span class="token" style="color: rgb(163, 21, 21);">    parts = line.split('|')
+</span><span class="token" style="color: rgb(163, 21, 21);">    if len(parts) &gt;= 5:
+</span><span class="token" style="color: rgb(163, 21, 21);">        try:
+</span><span class="token" style="color: rgb(163, 21, 21);">            return int(parts[4].strip())
+</span><span class="token" style="color: rgb(163, 21, 21);">        except ValueError:
+</span><span class="token" style="color: rgb(163, 21, 21);">            return None
+</span><span class="token" style="color: rgb(163, 21, 21);">    return None
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">output_base = "/output/salary_sorted"
+</span><span class="token" style="color: rgb(163, 21, 21);">num_reducers = 4
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">print("=" * 60)
+</span><span class="token" style="color: rgb(163, 21, 21);">print("GLOBAL SORT VERIFICATION")
+</span><span class="token" style="color: rgb(163, 21, 21);">print("=" * 60)
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">prev_file_max_salary = -1
+</span><span class="token" style="color: rgb(163, 21, 21);">all_correct = True
+</span><span class="token" style="color: rgb(163, 21, 21);">total_records = 0
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">for i in range(num_reducers):
+</span><span class="token" style="color: rgb(163, 21, 21);">    filename = f"part-r-{i:05d}"
+</span><span class="token" style="color: rgb(163, 21, 21);">    filepath = f"{output_base}/{filename}"
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">    lines = get_hdfs_file_content(filepath)
+</span><span class="token" style="color: rgb(163, 21, 21);">    lines = [l for l in lines if l.strip()]
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">    if not lines:
+</span><span class="token" style="color: rgb(163, 21, 21);">        print(f"\n{filename}: EMPTY")
+</span><span class="token" style="color: rgb(163, 21, 21);">        continue
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">    salaries = []
+</span><span class="token" style="color: rgb(163, 21, 21);">    for line in lines:
+</span><span class="token" style="color: rgb(163, 21, 21);">        s = extract_salary(line)
+</span><span class="token" style="color: rgb(163, 21, 21);">        if s is not None:
+</span><span class="token" style="color: rgb(163, 21, 21);">            salaries.append(s)
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">    file_min = min(salaries)
+</span><span class="token" style="color: rgb(163, 21, 21);">    file_max = max(salaries)
+</span><span class="token" style="color: rgb(163, 21, 21);">    record_count = len(salaries)
+</span><span class="token" style="color: rgb(163, 21, 21);">    total_records += record_count
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">    # Check 1: Is this file internally sorted?
+</span><span class="token" style="color: rgb(163, 21, 21);">    internally_sorted = all(
+</span><span class="token" style="color: rgb(163, 21, 21);">        salaries[j] &lt;= salaries[j+1]
+</span><span class="token" style="color: rgb(163, 21, 21);">        for j in range(len(salaries)-1)
+</span><span class="token" style="color: rgb(163, 21, 21);">    )
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">    # Check 2: Does this file's min &gt;= previous file's max?
+</span><span class="token" style="color: rgb(163, 21, 21);">    no_overlap = file_min &gt;= prev_file_max_salary
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">    status = "✅" if (internally_sorted and no_overlap) else "❌"
+</span><span class="token" style="color: rgb(163, 21, 21);">    if not (internally_sorted and no_overlap):
+</span><span class="token" style="color: rgb(163, 21, 21);">        all_correct = False
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">    print(f"\n{status} {filename}:")
+</span><span class="token" style="color: rgb(163, 21, 21);">    print(f"   Records:         {record_count:,}")
+</span><span class="token" style="color: rgb(163, 21, 21);">    print(f"   Salary range:    ${file_min:,} — ${file_max:,}")
+</span><span class="token" style="color: rgb(163, 21, 21);">    print(f"   Internally sorted: {internally_sorted}")
+</span><span class="token" style="color: rgb(163, 21, 21);">    print(f"   No overlap with previous: {no_overlap}")
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">    prev_file_max_salary = file_max
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">print(f"\n{'=' * 60}")
+</span><span class="token" style="color: rgb(163, 21, 21);">print(f"TOTAL RECORDS: {total_records:,}")
+</span><span class="token" style="color: rgb(163, 21, 21);">print(f"GLOBAL SORT VALID: {'✅ YES' if all_correct else '❌ NO'}")
+</span><span class="token" style="color: rgb(163, 21, 21);">print(f"{'=' * 60}")
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">PYEOF</span><span>
+</span>
+python3 verify_global_sort.py</code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ══════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ALTERNATIVE: Using IntervalSampler for pre-sorted-ish data</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ══════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// If your input is ROUGHLY sorted (e.g., from a previous partial sort),</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// IntervalSampler is more efficient than RandomSampler.</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Replace the sampler creation in the driver:</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// INSTEAD OF:</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// InputSampler.Sampler&lt;IntWritable, Text&gt; sampler =</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//     new InputSampler.RandomSampler&lt;&gt;(0.001, 10000, 100);</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// USE:</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// InputSampler.Sampler&lt;IntWritable, Text&gt; sampler =</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//     new InputSampler.IntervalSampler&lt;&gt;(0.001, 100);</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Parameters:</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   freq = 0.001    → sample every 1000th record</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//   maxSplits = 100 → from at most 100 splits</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// IntervalSampler reads records at FIXED INTERVALS</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// Faster than RandomSampler (no random number generation)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// But BIASED if data is not evenly distributed across splits</span></code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ══════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ADVANCED VARIANT: Global sort with Text keys (lexicographic)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// ══════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// When sorting by NAME instead of salary (alphabetical sort),</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// the key is Text and TotalOrderPartitioner uses a TRIE internally.</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// The only change is in the Mapper:</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">/*
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">public static class NameKeyMapper
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">        extends Mapper&lt;LongWritable, Text, Text, Text&gt; {
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">    private Text nameKey = new Text();
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">    @Override
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">    protected void map(LongWritable offset, Text line, Context context)
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">            throws IOException, InterruptedException {
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">        String record = line.toString().trim();
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">        if (record.isEmpty() || record.startsWith("EMP_ID")) return;
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">        String[] fields = record.split("\\|");
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">        if (fields.length &lt; 5) return;
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">        // Use NAME as sort key
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">        String name = fields[1].trim();
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">        nameKey.set(name);
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">        context.write(nameKey, line);
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">    }
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">}
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// And in the driver:
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// job.setMapOutputKeyClass(Text.class);  // Text instead of IntWritable
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">//
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// TotalOrderPartitioner automatically detects the key type
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">// and uses a Trie for Text keys (faster than binary search for strings)
+</span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">*/</span></code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># DIAGNOSTIC: Examine the partition file contents</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># The partition file is a SequenceFile — cannot cat directly</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Use this to inspect boundaries:</span><span>
+</span>
+<span>hadoop jar </span><span class="token" style="color: rgb(54, 172, 170);">$HADOOP_HOME</span><span>/share/hadoop/mapreduce/hadoop-mapreduce-examples-*.jar </span><span class="token" style="color: rgb(57, 58, 52);">\</span><span>
+</span><span>    secondarysort </span><span class="token file-descriptor" style="color: rgb(238, 153, 0); font-weight: bold;">2</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span class="token file-descriptor" style="color: rgb(238, 153, 0); font-weight: bold;">&amp;1</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">||</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">true</span><span>  </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># just to ensure classpath</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Write a small inspection tool:</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">cat</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span> InspectPartitionFile.java </span><span class="token" style="color: rgb(57, 58, 52);">&lt;&lt;</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'JAVAEOF'
+</span><span class="token" style="color: rgb(163, 21, 21);">import org.apache.hadoop.conf.Configuration;
+</span><span class="token" style="color: rgb(163, 21, 21);">import org.apache.hadoop.fs.Path;
+</span><span class="token" style="color: rgb(163, 21, 21);">import org.apache.hadoop.io.IntWritable;
+</span><span class="token" style="color: rgb(163, 21, 21);">import org.apache.hadoop.io.SequenceFile;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">public class InspectPartitionFile {
+</span><span class="token" style="color: rgb(163, 21, 21);">    public static void main(String[] args) throws Exception {
+</span><span class="token" style="color: rgb(163, 21, 21);">        Configuration conf = new Configuration();
+</span><span class="token" style="color: rgb(163, 21, 21);">        Path partFile = new Path(args[0]);
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">        SequenceFile.Reader reader = new SequenceFile.Reader(
+</span><span class="token" style="color: rgb(163, 21, 21);">            conf, SequenceFile.Reader.file(partFile));
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">        IntWritable key = new IntWritable();
+</span><span class="token" style="color: rgb(163, 21, 21);">        int boundaryIndex = 0;
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">        System.out.println("=== PARTITION BOUNDARIES ===");
+</span><span class="token" style="color: rgb(163, 21, 21);">        while (reader.next(key)) {
+</span><span class="token" style="color: rgb(163, 21, 21);">            System.out.println("Boundary " + boundaryIndex
+</span><span class="token" style="color: rgb(163, 21, 21);">                + ": salary = $" + String.format("%,d", key.get()));
+</span><span class="token" style="color: rgb(163, 21, 21);">            boundaryIndex++;
+</span><span class="token" style="color: rgb(163, 21, 21);">        }
+</span><span class="token" style="color: rgb(163, 21, 21);">        System.out.println("Total boundaries: " + boundaryIndex);
+</span><span class="token" style="color: rgb(163, 21, 21);">        System.out.println("This means " + (boundaryIndex + 1)
+</span><span class="token" style="color: rgb(163, 21, 21);">            + " reducers will receive non-overlapping ranges");
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">        reader.close();
+</span><span class="token" style="color: rgb(163, 21, 21);">    }
+</span><span class="token" style="color: rgb(163, 21, 21);">}
+</span><span class="token" style="color: rgb(163, 21, 21);">JAVAEOF</span><span>
+</span>
+<span>javac -classpath </span><span class="token" style="color: rgb(54, 172, 170);">$HADOOP_CLASSPATH</span><span> -d build InspectPartitionFile.java
+</span><span>jar -uvf salary-sort.jar -C build/ </span><span class="token builtin" style="color: rgb(43, 145, 175);">.</span><span>
+</span>
+<span>hadoop jar salary-sort.jar InspectPartitionFile </span><span class="token" style="color: rgb(57, 58, 52);">\</span><span>
+</span>    /data/employees/_partition.lst
+
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Expected output (example):</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># === PARTITION BOUNDARIES ===</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Boundary 0: salary = $43,271</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Boundary 1: salary = $65,108</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Boundary 2: salary = $91,847</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Total boundaries: 3</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># This means 4 reducers will receive non-overlapping ranges</span></code></pre></div>
+<hr>
+<h2>🔑 KEY TAKEAWAY</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>WHAT PROJECT 18 ESTABLISHED:
+</span>
+✅ PROBLEM: Default MapReduce sorts WITHIN each reducer but NOT
+   ACROSS reducers — HashPartitioner (Project 10) distributes
+   keys by hash, not by value range
+
+✅ SOLUTION: TotalOrderPartitioner + InputSampler
+   → Sample data to discover distribution
+   → Compute range boundaries
+   → Partition by range instead of hash
+   → Each reducer handles a non-overlapping range
+   → Concatenation of outputs = globally sorted
+
+✅ THREE SAMPLING STRATEGIES:
+   → RandomSampler (safest, general purpose)
+   → IntervalSampler (faster, for roughly sorted data)
+   → SplitSampler (quick, for testing only)
+
+✅ INTERNAL MECHANICS:
+   → Sampling → sort samples → pick evenly-spaced boundaries
+   → Boundaries stored in SequenceFile via DistributedCache (Proj 15)
+   → Binary search (numeric) or Trie (text) at partition time
+   → O(log R) per record where R = number of reducers
+
+CONNECTION TO PREVIOUS PROJECTS:
+   → Project 10: Introduced partitioners — this REPLACES
+     HashPartitioner with TotalOrderPartitioner
+   → Project 13: WritableComparable keys — TotalOrderPartitioner
+     relies on compareTo() for binary search
+   → Project 15: DistributedCache — partition file distributed
+     to all mappers via this mechanism
+   → Project 17: Reduce-Side Join output is the INPUT to this
+     sort job — real pipeline thinking
+
+WHAT WE HAVE NOT COVERED YET:
+   → What if you need to sort by salary AND THEN by hire date
+     within the same salary?
+   → Global sort gives you ONE sort dimension
+   → For TWO sort dimensions → Secondary Sort</code></pre></div>
+<hr>
+<h2>🌉 BRIDGE TO PROJECT 19</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>PROJECT 18 sorted all employees by salary GLOBALLY.
+</span>
+But what if management asks:
+"Group all transactions by CUSTOMER_ID, and within each
+customer, sort transactions by DATE (newest first)"?
+
+This requires TWO levels of ordering:
+  → PRIMARY sort:   by customer_id (grouping)
+  → SECONDARY sort: by date (ordering within group)
+
+DEFAULT MapReduce cannot do this:
+  → Reducer receives all values for a key
+  → But values arrive in UNDEFINED ORDER
+  → You get all transactions for customer C001
+  → But dates are scrambled: [Mar, Jan, Dec, Jul]
+
+PROJECT 19 introduces SECONDARY SORT:
+  → Composite key: (customer_id, date)
+  → Custom Partitioner: partition by customer_id ONLY
+  → Custom SortComparator: sort by customer_id THEN date
+  → Custom GroupingComparator: group by customer_id ONLY
+
+This is the MOST COMPLEX MapReduce pattern —
+and the final piece of the sorting puzzle before we move
+to multi-output and job chaining.</code></pre></div>
+<hr>
+</div>
+</div>
+
+<!-- ========== data-index="7" ========== -->
+
+        </div>
+
+        <div class="nav-bar">
+            <a href="project-17.html" class="nav-button prev">← Previous Project</a>
+            <div class="page-info">
+                <a href="index.html" class="nav-button home">📚 Table of Contents</a><br>
+                <span style="margin-top:8px;display:block">Project 18 of 50</span>
+            </div>
+            <a href="project-19.html" class="nav-button next">Next Project →</a>
+        </div>
+    </div>
+
+    
+    <div id="progress-track"><div id="progress-fill"></div></div>
+    <div id="progress-pct">0%</div>
+
+
+<script src="script.js"></script>
+
+</body>
+</html>

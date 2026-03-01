@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/png" href="images/favicon.png">
+    <title>🐘 Apache Hadoop — 50 Progressive Projects</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.6; color: #1a202c;
+            background: linear-gradient(135deg, #eab308 0%, #fbbf24 100%);
+            min-height: 100vh; padding: 48px 24px;
+        }
+        .container {
+            max-width: 1800px; margin: 0 auto;
+            background: white; border-radius: 14px;
+            box-shadow: 0 12px 48px rgba(0,0,0,0.25); overflow: hidden;
+        }
+        header {
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+            color: white; padding: 54px 44px; text-align: center;
+        }
+        header h1 { font-size: 2.5em; margin-bottom: 14px; font-weight: 700; }
+        header p  { font-size: 1.15em; opacity: 0.95; }
+        .toc { padding: 40px 44px; }
+        
+        .intro-project {
+            display: block; padding: 20px 24px; margin-bottom: 20px;
+            background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+            border-left: 6px solid #eab308;
+            border-radius: 8px; text-decoration: none; color: #1a202c;
+            transition: all 0.22s; box-shadow: 0 3px 10px rgba(234,179,8,0.2);
+        }
+        .intro-project:hover {
+            transform: translateX(10px);
+            box-shadow: 0 6px 20px rgba(234,179,8,0.35);
+        }
+        .intro-label { font-size: 0.9em; color: #78350f; font-weight: 700; display: block; margin-bottom: 6px; }
+        .intro-title { font-size: 1.15em; font-weight: 600; color: #1a202c; }
+        
+        .phase-header {
+            background: linear-gradient(to right, #fef3c7, #fde68a);
+            padding: 14px 20px;
+            margin: 30px 0 12px;
+            border-left: 5px solid #eab308;
+            border-radius: 6px;
+            font-size: 1.1em;
+            font-weight: 700;
+            color: #78350f;
+        }
+        .phase-header:first-of-type { margin-top: 0; }
+        
+        .project-link {
+            display: block; padding: 16px 20px; margin-bottom: 8px;
+            background: linear-gradient(to right, #fefce8, #fef3c7);
+            border-left: 4px solid #fbbf24;
+            border-radius: 8px; text-decoration: none; color: #1a202c;
+            transition: all 0.22s; box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+        }
+        .project-link:hover {
+            transform: translateX(10px);
+            background: linear-gradient(to right, #fef3c7, #fde68a);
+            box-shadow: 0 4px 16px rgba(234,179,8,0.25);
+            border-left-width: 6px; border-left-color: #eab308;
+        }
+        .project-num   { font-size: 0.84em; color: #ca8a04; font-weight: 700; display: block; margin-bottom: 4px; }
+        .project-title { font-size: 1em; font-weight: 500; color: #1a202c; }
+        .stats { text-align: center; padding: 22px; background: #fefce8; border-top: 2px solid #fde68a; color: #78350f; font-size: 0.95em; }
+
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🐘 Apache Hadoop Masterclass</h1>
+            <p>50 Progressive Projects — Complete Learning Path</p>
+        </header>
+        <div class="toc">
+                <a href="project-0.html" class="intro-project">
+                <span class="intro-label">📋 START HERE — PROJECT 0</span>
+                <span class="intro-title">APACHE HADOOP — COMPREHENSIVE 50-PROJECT MASTERY GUIDE</span>
+            </a>
+        <div class="phase-header">Phase 1: Very Easy — Foundation Thinking</div>
+            <a href="project-1.html" class="project-link">
+                <span class="project-num">PROJECT 1</span>
+                <span class="project-title">THE OVERWHELMED LOG SERVER — WHY ONE MACHINE FAILS</span>
+            </a>
+            <a href="project-2.html" class="project-link">
+                <span class="project-num">PROJECT 2</span>
+                <span class="project-title">STORING A 10GB TEXT FILE NOBODY CAN OPEN LOCALLY</span>
+            </a>
+            <a href="project-3.html" class="project-link">
+                <span class="project-num">PROJECT 3</span>
+                <span class="project-title">NAVIGATING THE WAREHOUSE — LISTING, MOVING, AND READING HDFS FILES</span>
+            </a>
+            <a href="project-4.html" class="project-link">
+                <span class="project-num">PROJECT 4</span>
+                <span class="project-title">COUNTING WORDS IN A SMALL DIARY — THE HELLO WORLD OF MAPREDUCE</span>
+            </a>
+            <a href="project-5.html" class="project-link">
+                <span class="project-num">PROJECT 5</span>
+                <span class="project-title">TRACKING DAILY TEMPERATURES FROM WEATHER SENSORS</span>
+            </a>
+            <a href="project-6.html" class="project-link">
+                <span class="project-num">PROJECT 6</span>
+                <span class="project-title">FINDING THE MOST POPULAR PRODUCT IN A SMALL SHOP</span>
+            </a>
+            <a href="project-7.html" class="project-link">
+                <span class="project-num">PROJECT 7</span>
+                <span class="project-title">UNDERSTANDING WHY THE JOB TOOK SO LONG — READING HADOOP LOGS</span>
+            </a>
+            <a href="project-8.html" class="project-link">
+                <span class="project-num">PROJECT 8</span>
+                <span class="project-title">RUNNING EVERYTHING LOCALLY BEFORE THE CLUSTER — PSEUDO-DISTRIBUTED MODE</span>
+            </a>
+        <div class="phase-header">Phase 2: Easy — Core Patterns</div>
+            <a href="project-9.html" class="project-link">
+                <span class="project-num">PROJECT 9</span>
+                <span class="project-title">REDUCING NETWORK TRAFFIC — SUMMARIZING SALES BEFORE SHIPPING</span>
+            </a>
+            <a href="project-10.html" class="project-link">
+                <span class="project-num">PROJECT 10</span>
+                <span class="project-title">DISTRIBUTING CUSTOMER DATA TO REGION-SPECIFIC FILES</span>
+            </a>
+            <a href="project-11.html" class="project-link">
+                <span class="project-num">PROJECT 11</span>
+                <span class="project-title">CLEANING MESSY HOSPITAL RECORDS BEFORE ANALYSIS</span>
+            </a>
+            <a href="project-12.html" class="project-link">
+                <span class="project-num">PROJECT 12</span>
+                <span class="project-title">PROCESSING CSV, TSV, AND JSON — NOT EVERYTHING IS PLAIN TEXT</span>
+            </a>
+            <a href="project-13.html" class="project-link">
+                <span class="project-num">PROJECT 13</span>
+                <span class="project-title">COUNTING UNIQUE VISITORS TO A WEBSITE PER HOUR</span>
+            </a>
+            <a href="project-14.html" class="project-link">
+                <span class="project-num">PROJECT 14</span>
+                <span class="project-title">COMPRESSING OUTPUT TO SAVE CLUSTER STORAGE COSTS</span>
+            </a>
+            <a href="project-15.html" class="project-link">
+                <span class="project-num">PROJECT 15</span>
+                <span class="project-title">SHARING A LOOKUP TABLE ACROSS ALL MAPPERS WITHOUT SHIPPING IT EVERY TIME</span>
+            </a>
+        <div class="phase-header">Phase 3: Medium — Professional Techniques</div>
+            <a href="project-16.html" class="project-link">
+                <span class="project-num">PROJECT 16</span>
+                <span class="project-title">ENRICHING ORDERS WITH CUSTOMER NAMES — THE MAP-SIDE JOIN</span>
+            </a>
+            <a href="project-17.html" class="project-link">
+                <span class="project-num">PROJECT 17</span>
+                <span class="project-title">JOINING TWO MASSIVE DATASETS — ORDERS MEETS PRODUCTS</span>
+            </a>
+            <a href="project-18.html" class="project-link">
+                <span class="project-num">PROJECT 18</span>
+                <span class="project-title">SORTING ALL EMPLOYEE SALARIES GLOBALLY ACROSS THE CLUSTER</span>
+            </a>
+            <a href="project-19.html" class="project-link">
+                <span class="project-num">PROJECT 19</span>
+                <span class="project-title">GROUPING TRANSACTIONS BY CUSTOMER THEN SORTING BY DATE WITHIN EACH</span>
+            </a>
+            <a href="project-20.html" class="project-link">
+                <span class="project-num">PROJECT 20</span>
+                <span class="project-title">WRITING ANALYSIS RESULTS TO MULTIPLE OUTPUT DIRECTORIES SIMULTANEOUSLY</span>
+            </a>
+            <a href="project-21.html" class="project-link">
+                <span class="project-num">PROJECT 21</span>
+                <span class="project-title">CHAINING THREE MAPREDUCE JOBS INTO A DATA PIPELINE</span>
+            </a>
+            <a href="project-22.html" class="project-link">
+                <span class="project-num">PROJECT 22</span>
+                <span class="project-title">WHO GETS THE RESOURCES? UNDERSTANDING YARN FROM INSIDE</span>
+            </a>
+            <a href="project-23.html" class="project-link">
+                <span class="project-num">PROJECT 23</span>
+                <span class="project-title">TUNING MAP AND REDUCE TASK MEMORY TO STOP THE CLUSTER CRASHING</span>
+            </a>
+            <a href="project-24.html" class="project-link">
+                <span class="project-num">PROJECT 24</span>
+                <span class="project-title">QUERYING HADOOP DATA WITHOUT WRITING JAVA — ENTER APACHE HIVE</span>
+            </a>
+            <a href="project-25.html" class="project-link">
+                <span class="project-num">PROJECT 25</span>
+                <span class="project-title">PARTITIONING AND BUCKETING A HIVE TABLE FOR FASTER QUERIES</span>
+            </a>
+            <a href="project-26.html" class="project-link">
+                <span class="project-num">PROJECT 26</span>
+                <span class="project-title">BUILDING A DATA FLOW SCRIPT WITHOUT JAVA — APACHE PIG</span>
+            </a>
+            <a href="project-27.html" class="project-link">
+                <span class="project-num">PROJECT 27</span>
+                <span class="project-title">REAL-TIME LOOKUPS ON HADOOP DATA — INTRODUCTION TO HBASE</span>
+            </a>
+            <a href="project-28.html" class="project-link">
+                <span class="project-num">PROJECT 28</span>
+                <span class="project-title">IMPORTING A MYSQL DATABASE INTO HDFS AUTOMATICALLY</span>
+            </a>
+            <a href="project-29.html" class="project-link">
+                <span class="project-num">PROJECT 29</span>
+                <span class="project-title">STREAMING LIVE WEB SERVER LOGS INTO HDFS</span>
+            </a>
+            <a href="project-30.html" class="project-link">
+                <span class="project-num">PROJECT 30</span>
+                <span class="project-title">CHOOSING THE RIGHT FILE FORMAT — TEXT vs SEQUENCEFILE vs AVRO vs PARQUET vs ORC</span>
+            </a>
+        <div class="phase-header">Phase 4: Hard — Advanced Patterns</div>
+            <a href="project-31.html" class="project-link">
+                <span class="project-num">PROJECT 31</span>
+                <span class="project-title">ORCHESTRATING A NIGHTLY ETL PIPELINE WITH APACHE OOZIE</span>
+            </a>
+            <a href="project-32.html" class="project-link">
+                <span class="project-num">PROJECT 32</span>
+                <span class="project-title">WRITING A CUSTOM INPUTFORMAT TO PARSE BINARY SENSOR DATA</span>
+            </a>
+            <a href="project-33.html" class="project-link">
+                <span class="project-num">PROJECT 33</span>
+                <span class="project-title">PROCESSING 1TB OF DATA — DIAGNOSING AND FIXING SKEW</span>
+            </a>
+            <a href="project-34.html" class="project-link">
+                <span class="project-num">PROJECT 34</span>
+                <span class="project-title">BUILDING A STAR SCHEMA DATA WAREHOUSE ON HIVE WITH ORC</span>
+            </a>
+            <a href="project-35.html" class="project-link">
+                <span class="project-num">PROJECT 35</span>
+                <span class="project-title">DESIGNING AN HBASE ROW KEY FOR BILLION-RECORD TIME SERIES</span>
+            </a>
+            <a href="project-36.html" class="project-link">
+                <span class="project-num">PROJECT 36</span>
+                <span class="project-title">BULK LOADING 500 MILLION RECORDS INTO HBASE WITHOUT KILLING IT</span>
+            </a>
+            <a href="project-37.html" class="project-link">
+                <span class="project-num">PROJECT 37</span>
+                <span class="project-title">STREAMING MAPREDUCE WITH PYTHON — HADOOP STREAMING API</span>
+            </a>
+            <a href="project-38.html" class="project-link">
+                <span class="project-num">PROJECT 38</span>
+                <span class="project-title">UNIT TESTING MAPREDUCE WITHOUT A CLUSTER — MRUNIT AND LOCAL RUNNERS</span>
+            </a>
+            <a href="project-39.html" class="project-link">
+                <span class="project-num">PROJECT 39</span>
+                <span class="project-title">BUILDING A MULTI-TENANT CLUSTER — YARN QUEUES AND FAIR SCHEDULING</span>
+            </a>
+            <a href="project-40.html" class="project-link">
+                <span class="project-num">PROJECT 40</span>
+                <span class="project-title">END-TO-END PIPELINE — INGEST → CLEAN → TRANSFORM → WAREHOUSE → SERVE</span>
+            </a>
+        <div class="phase-header">Phase 5: Very Hard — Mastery</div>
+            <a href="project-41.html" class="project-link">
+                <span class="project-num">PROJECT 41</span>
+                <span class="project-title">SECURING THE CLUSTER — KERBEROS AUTHENTICATION FOR HADOOP</span>
+            </a>
+            <a href="project-42.html" class="project-link">
+                <span class="project-num">PROJECT 42</span>
+                <span class="project-title">ENCRYPTING DATA AT REST AND IN TRANSIT ON HDFS</span>
+            </a>
+            <a href="project-43.html" class="project-link">
+                <span class="project-num">PROJECT 43</span>
+                <span class="project-title">HDFS FEDERATION — SCALING THE NAMENODE BEYOND ONE NAMESPACE</span>
+            </a>
+            <a href="project-44.html" class="project-link">
+                <span class="project-num">PROJECT 44</span>
+                <span class="project-title">NAMENODE HIGH AVAILABILITY — SURVIVING A MASTER NODE CRASH</span>
+            </a>
+            <a href="project-45.html" class="project-link">
+                <span class="project-num">PROJECT 45</span>
+                <span class="project-title">RESOURCEMANAGER HIGH AVAILABILITY AND RECOVERY</span>
+            </a>
+            <a href="project-46.html" class="project-link">
+                <span class="project-num">PROJECT 46</span>
+                <span class="project-title">PROCESSING PETABYTE-SCALE CLICKSTREAM WITH OPTIMIZED MAPREDUCE</span>
+            </a>
+            <a href="project-47.html" class="project-link">
+                <span class="project-num">PROJECT 47</span>
+                <span class="project-title">BUILDING A LAMBDA ARCHITECTURE — BATCH LAYER WITH HADOOP</span>
+            </a>
+            <a href="project-48.html" class="project-link">
+                <span class="project-num">PROJECT 48</span>
+                <span class="project-title">MIGRATING A HADOOP PIPELINE TO APACHE SPARK — SIDE-BY-SIDE</span>
+            </a>
+            <a href="project-49.html" class="project-link">
+                <span class="project-num">PROJECT 49</span>
+                <span class="project-title">RUNNING HADOOP WORKLOADS ON CLOUD — S3, EMRFS, AND ADLS</span>
+            </a>
+            <a href="project-50.html" class="project-link">
+                <span class="project-num">PROJECT 50</span>
+                <span class="project-title">CAPSTONE — PRODUCTION-GRADE DATA PLATFORM: DESIGN, BUILD, HARDEN, MONITOR</span>
+            </a>
+
+        </div>
+    </div>
+</body>
+</html>

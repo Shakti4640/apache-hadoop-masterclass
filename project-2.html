@@ -1,0 +1,1186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/png" href="images/favicon.png">
+    <title>Project 2: STORING A 10GB TEXT FILE NOBODY CAN OPEN LOCALLY — Apache Hadoop Masterclass</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <div class="content">
+            <div class="chat-message" data-index="5">
+<div class="px-2"><h1>PROJECT 2: STORING A 10GB TEXT FILE NOBODY CAN OPEN LOCALLY</h1>
+<hr>
+<h2>🔴 HYPOTHETICAL PROBLEM</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>SCENARIO:
+</span>→ You work at a telecom company
+→ The billing system generates a single CSV file every night
+→ File: "call_records_20240115.csv" — exactly 10GB
+→ Contains: caller_id, receiver_id, duration, timestamp, cell_tower_id
+
+WHAT GOES WRONG:
+→ You try to open it in Excel → Excel crashes (max ~1GB)
+→ You try `cat` on Linux → Terminal floods for 20 minutes
+→ You try Python pandas.read_csv() → MemoryError (machine has 8GB RAM)
+→ You try to copy it to a backup server → Network transfer takes 15 minutes
+→ The disk holding it fails → FILE IS GONE FOREVER
+
+QUESTIONS THAT ARISE:
+→ How do you STORE a file too large for one machine to handle?
+→ How do you PROTECT it from hardware failure?
+→ How do you READ it efficiently when processing time?
+→ How do you SCALE when tomorrow's file is 50GB?
+
+PROJECT 1 told us the ANSWER is HDFS.
+NOW we learn exactly HOW HDFS does it — block by block.</code></pre></div>
+<hr>
+<h2>🔍 HOW TO APPROACH IT</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>FROM PROJECT 1 WE KNOW:
+</span>→ HDFS splits files into blocks
+→ Blocks are distributed across DataNodes
+→ Blocks are replicated for fault tolerance
+→ NameNode tracks all metadata
+
+NOW WE NEED TO UNDERSTAND:
+
+QUESTION 1: Why split into blocks at all?
+QUESTION 2: Why 128MB specifically?
+QUESTION 3: What does the NameNode ACTUALLY store in memory?
+QUESTION 4: What does a DataNode ACTUALLY store on disk?
+QUESTION 5: How does replication ACTUALLY happen?
+QUESTION 6: What happens when I run "hdfs dfs -put"?
+QUESTION 7: What happens when a DataNode dies?
+
+LET'S ANSWER EACH ONE WITH MECHANICAL PRECISION.</code></pre></div>
+<hr>
+<h2>💡 HOW CAN WE SOLVE IT</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>ANSWER TO QUESTION 1: WHY SPLIT INTO BLOCKS?
+</span>
+Without blocks (traditional filesystem):
+┌───────────────────────────────────────────┐
+│         10GB FILE ON ONE DISK             │
+│  [══════════════════════════════════════]  │
+│  → One machine reads it: 10GB / 200MB/s   │
+│    = 50 seconds JUST TO READ              │
+│  → If disk fails: ENTIRE file lost        │
+│  → Cannot parallelize: one machine only   │
+└───────────────────────────────────────────┘
+
+With blocks (HDFS):
+┌───────────────────────────────────────────────────────────┐
+│              10GB FILE SPLIT INTO 128MB BLOCKS             │
+│                                                            │
+│  10GB / 128MB = 80 BLOCKS                                  │
+│                                                            │
+│  DataNode 1: [Blk01][Blk05][Blk09]...[Blk77]  (20 blocks)│
+│  DataNode 2: [Blk02][Blk06][Blk10]...[Blk78]  (20 blocks)│
+│  DataNode 3: [Blk03][Blk07][Blk11]...[Blk79]  (20 blocks)│
+│  DataNode 4: [Blk04][Blk08][Blk12]...[Blk80]  (20 blocks)│
+│                                                            │
+│  → 4 machines read in parallel:                            │
+│    Each reads 2.5GB / 200MB/s = 12.5 seconds              │
+│  → 4× faster than single machine                          │
+│  → If DataNode 2 dies: blocks exist on other nodes         │
+└───────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════
+
+ANSWER TO QUESTION 2: WHY 128MB SPECIFICALLY?
+
+The block size is a TRADEOFF between two forces:
+
+FORCE A — Seek Time vs. Transfer Time
+→ Typical disk seek time: ~10ms
+→ Typical disk transfer rate: ~100-200 MB/s
+→ Goal: Make seek time &lt; 1% of total block read time
+→ 10ms seek + (128MB / 150MB/s) ≈ 10ms + 850ms = 860ms
+→ Seek is ~1.2% of total — ACCEPTABLE
+→ If block were 1MB: 10ms + 6.7ms = 16.7ms → Seek is 60% — TERRIBLE
+
+FORCE B — NameNode Memory
+→ Each block entry costs ~150 bytes in NameNode memory
+→ Smaller blocks = MORE blocks = MORE NameNode memory
+→ 10GB file with 128MB blocks = 80 blocks × 150 bytes = 12KB metadata
+→ 10GB file with 1MB blocks = 10,240 blocks × 150 bytes = 1.5MB metadata
+→ At petabyte scale this difference becomes ENORMOUS
+
+THE MATH:
+┌─────────────┬──────────────┬────────────────────┬──────────────────┐
+│ Block Size  │ Blocks for   │ NameNode Memory    │ Seek Overhead    │
+│             │ 10GB file    │ for 10GB file      │                  │
+├─────────────┼──────────────┼────────────────────┼──────────────────┤
+│ 1MB         │ 10,240       │ 1.5 MB             │ 60% (terrible)   │
+│ 16MB        │ 640          │ 96 KB              │ 9% (poor)        │
+│ 64MB        │ 160          │ 24 KB              │ 2.3% (ok)        │
+│ 128MB       │ 80           │ 12 KB              │ 1.2% (good)      │ ← DEFAULT
+│ 256MB       │ 40           │ 6 KB               │ 0.6% (great)     │
+│ 1GB         │ 10           │ 1.5 KB             │ 0.15% (great)    │
+└─────────────┴──────────────┴────────────────────┴──────────────────┘
+
+WHY NOT 1GB?
+→ MapReduce assigns ONE mapper per block (typically)
+→ 10 blocks = only 10 mappers = poor parallelism
+→ 128MB gives 80 mappers = excellent parallelism
+
+128MB is the SWEET SPOT between:
+  → NameNode memory efficiency
+  → Disk seek efficiency  
+  → MapReduce parallelism</code></pre></div>
+<hr>
+<h2>✅ WHAT COULD BE DONE</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>ANSWER TO QUESTION 3: WHAT DOES NAMENODE ACTUALLY STORE?
+</span>
+The NameNode maintains TWO critical data structures IN MEMORY:
+
+STRUCTURE 1: NAMESPACE IMAGE (fsimage)
+→ The complete directory tree of HDFS
+→ Every file, every directory, permissions, timestamps
+→ Like a phone book — maps file names to block lists
+
+  /
+  ├── user/
+  │   └── telecom/
+  │       └── call_records_20240115.csv
+  │           → file_id: 1001
+  │           → owner: telecom_etl
+  │           → permissions: 644
+  │           → size: 10,737,418,240 bytes (10GB)
+  │           → replication: 3
+  │           → block_size: 134,217,728 (128MB)
+  │           → blocks: [blk_001, blk_002, ..., blk_080]
+  │
+  └── tmp/
+      └── staging/
+
+STRUCTURE 2: BLOCK-TO-DATANODE MAPPING
+→ Which DataNode holds which block replica
+→ NOT persisted to disk — rebuilt from DataNode heartbeats at startup
+
+  blk_001 → [DataNode1:50010, DataNode3:50010, DataNode5:50010]
+  blk_002 → [DataNode2:50010, DataNode4:50010, DataNode1:50010]
+  blk_003 → [DataNode3:50010, DataNode5:50010, DataNode2:50010]
+  ...
+  blk_080 → [DataNode4:50010, DataNode1:50010, DataNode3:50010]
+
+PERSISTENCE MECHANISM:
+→ fsimage: Full snapshot written to disk periodically
+→ edits log: Every change (create file, delete, rename) written immediately
+→ At startup: fsimage + edits log = current state
+→ SecondaryNameNode periodically merges edits into fsimage
+  (to prevent edits log from growing forever)
+
+  ┌────────────────────────────────────────────────────────┐
+  │                 NAMENODE PERSISTENCE                    │
+  │                                                        │
+  │  [fsimage_0]  +  [edits_1, edits_2, ..., edits_N]     │
+  │       ↓                        ↓                       │
+  │  SecondaryNameNode merges them periodically             │
+  │       ↓                                                │
+  │  [fsimage_N]  (new checkpoint)                         │
+  │                                                        │
+  │  ⚠️ SecondaryNameNode is NOT a backup NameNode!        │
+  │     It is a CHECKPOINTING helper only.                 │
+  │     If NameNode dies, cluster is DOWN.                 │
+  │     (Fixed in Project 44: NameNode HA)                 │
+  └────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════
+
+ANSWER TO QUESTION 4: WHAT DOES DATANODE ACTUALLY STORE ON DISK?
+
+Each DataNode stores blocks as REGULAR FILES on its local filesystem:
+
+  DataNode 1 local disk:
+  /opt/hadoop/data/datanode/current/BP-xxx/current/finalized/
+  ├── subdir0/
+  │   ├── blk_001          ← actual data (128MB of raw bytes)
+  │   ├── blk_001.meta     ← checksum file (for corruption detection)
+  │   ├── blk_005
+  │   ├── blk_005.meta
+  │   └── ...
+  └── subdir1/
+      ├── blk_009
+      ├── blk_009.meta
+      └── ...
+
+IMPORTANT DETAILS:
+→ blk_001 is literally 128MB of the original file's bytes
+→ blk_001.meta contains CRC32 checksums (one per 512 bytes)
+→ On READ, DataNode verifies checksums → detects bit rot
+→ If corruption detected → DataNode reports to NameNode
+   → NameNode triggers re-replication from a healthy copy</code></pre></div>
+<hr>
+<h2>✅ WHAT SHOULD DO</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>ANSWER TO QUESTION 5: HOW DOES REPLICATION ACTUALLY HAPPEN?
+</span>
+RACK AWARENESS STRATEGY:
+→ Hadoop knows which DataNodes are in which server rack
+→ Replication placement follows a specific policy:
+
+  For replication factor = 3:
+  
+  Replica 1: Same node as the writer (or random node if client is outside cluster)
+  Replica 2: A node on a DIFFERENT rack
+  Replica 3: A different node on the SAME rack as Replica 2
+
+  WHY THIS SPECIFIC PLACEMENT?
+  
+  ┌─────── Rack 1 ──────┐    ┌─────── Rack 2 ──────┐
+  │                      │    │                      │
+  │  [DN1: Replica 1] ◄─┼────┼─► [DN3: Replica 2]   │
+  │                      │    │   [DN4: Replica 3]   │
+  │  [DN2]               │    │                      │
+  └──────────────────────┘    └──────────────────────┘
+
+  → If Rack 1 loses power → Replicas 2 &amp; 3 on Rack 2 survive
+  → If DN3 dies → Replica 3 on DN4 (same rack) survives
+  → Writing only crosses rack switch ONCE (not twice)
+    → Minimizes inter-rack bandwidth usage
+
+PIPELINE REPLICATION (from Project 1, now in detail):
+
+  Client writes blk_001:
+  
+  Step 1: Client asks NameNode "Where should I put this block?"
+  Step 2: NameNode returns: [DN1, DN3, DN4]
+  Step 3: Client opens pipeline:
+  
+  ┌────────┐  data packets  ┌──────┐  forward  ┌──────┐  forward  ┌──────┐
+  │ Client │ ─────────────→ │ DN1  │ ────────→ │ DN3  │ ────────→ │ DN4  │
+  └────────┘                └──────┘           └──────┘           └──────┘
+       ↑                         │                  │                  │
+       └─────── ACK ─────────────┴───── ACK ────────┴────── ACK ──────┘
+  
+  Step 4: Data flows in 64KB PACKETS (not entire 128MB at once)
+  Step 5: Each packet is ACKnowledged back through the pipeline
+  Step 6: When all packets ACKed → block is committed
+  Step 7: Client tells NameNode "blk_001 written to DN1, DN3, DN4"
+  Step 8: NameNode records the mapping
+
+1. ALWAYS verify block health after uploading large files
+   → hdfs fsck /path/to/file -files -blocks -locations
+
+2. UNDERSTAND the 128MB default — change it ONLY with reason
+   → Larger blocks (256MB) for very large sequential files
+   → Smaller blocks (64MB) NEVER recommended in modern Hadoop
+
+3. MONITOR NameNode heap usage as file count grows
+   → Each file + block costs ~150 bytes of NameNode heap
+   → 10 million files with 3 blocks each = 30M entries × 150B ≈ 4.5GB heap
+
+4. ALWAYS check replication factor matches your fault tolerance needs
+   → Development: 1 (saves disk, no fault tolerance needed)
+   → Production: 3 (survives any single node failure)
+   → Critical data: 5+ (survives rack-level failures)</code></pre></div>
+<hr>
+<h2>🚫 WHAT SHOULD NOT DO</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>1. DO NOT store millions of small files in HDFS
+</span>   → 1 million files × 1KB each = 1GB of data
+   → BUT: 1 million files × 150 bytes metadata = 150MB of NameNode heap
+   → Meanwhile: 1 single 1GB file = ~8 blocks × 150B = 1.2KB metadata
+   → RATIO: Small files use 125,000× MORE NameNode memory per byte of data
+
+   ┌──────────────────────────────────────────────────────────────┐
+   │          THE SMALL FILES PROBLEM — VISUALIZED                │
+   │                                                              │
+   │  1,000,000 × 1KB files:                                     │
+   │    Data stored:    1 GB                                      │
+   │    NameNode heap:  ~150 MB (just for metadata!)              │
+   │    Blocks created: 1,000,000 (one per file minimum)          │
+   │                                                              │
+   │  1 × 1GB file:                                               │
+   │    Data stored:    1 GB                                      │
+   │    NameNode heap:  ~1.2 KB                                   │
+   │    Blocks created: 8                                         │
+   │                                                              │
+   │  SAME DATA, 125,000× MORE NAMENODE PRESSURE                 │
+   └──────────────────────────────────────────────────────────────┘
+
+2. DO NOT format the NameNode after initial setup
+   → "hdfs namenode -format" DESTROYS all metadata
+   → All files become inaccessible (data still on DataNodes but orphaned)
+   → Only format ONCE during initial cluster setup
+
+3. DO NOT set replication factor higher than number of DataNodes
+   → 3 replicas with 2 DataNodes → one replica can never be placed
+   → NameNode will constantly warn about under-replicated blocks
+   → Wastes NameNode effort trying to place impossible replicas
+
+4. DO NOT ignore under-replicated blocks warnings
+   → Means some blocks have fewer copies than expected
+   → One more node failure could cause DATA LOSS
+   → Check with: hdfs dfsadmin -report
+
+5. DO NOT let NameNode's edits log grow unbounded
+   → SecondaryNameNode must be running and checkpointing
+   → If edits log is huge, NameNode restart takes HOURS
+   → (It replays every edit since last checkpoint)
+
+6. DO NOT put the NameNode metadata on the same disk as DataNode storage
+   → NameNode metadata writes must be fast and reliable
+   → DataNode I/O will compete and slow down metadata operations
+   → In production: NameNode gets dedicated SSD/RAID disks</code></pre></div>
+<hr>
+<h2>🔀 WHEN TO USE WHAT</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>BLOCK SIZE SELECTION:
+</span>
+┌──────────────────────────────┬────────────┬─────────────────────────────┐
+│ SCENARIO                     │ BLOCK SIZE │ REASON                      │
+├──────────────────────────────┼────────────┼─────────────────────────────┤
+│ General purpose (default)    │ 128MB      │ Balanced seek/transfer/     │
+│                              │            │ parallelism                 │
+├──────────────────────────────┼────────────┼─────────────────────────────┤
+│ Very large files (100GB+)    │ 256MB      │ Fewer blocks = less         │
+│ with sequential access       │            │ NameNode memory, fewer      │
+│                              │            │ map tasks to schedule       │
+├──────────────────────────────┼────────────┼─────────────────────────────┤
+│ Heavily processed files      │ 128MB      │ More blocks = more mappers  │
+│ needing maximum parallelism  │            │ = more parallelism          │
+├──────────────────────────────┼────────────┼─────────────────────────────┤
+│ SSD-based clusters           │ 256MB+     │ SSDs have near-zero seek    │
+│                              │            │ time, so larger blocks OK   │
+└──────────────────────────────┴────────────┴─────────────────────────────┘
+
+REPLICATION FACTOR SELECTION:
+
+┌──────────────────────────────┬──────┬───────────────────────────────────┐
+│ SCENARIO                     │ REP  │ REASON                            │
+├──────────────────────────────┼──────┼───────────────────────────────────┤
+│ Development / testing        │ 1    │ Save disk, no fault tolerance     │
+│                              │      │ needed                            │
+├──────────────────────────────┼──────┼───────────────────────────────────┤
+│ Production (standard)        │ 3    │ Survives any single node failure  │
+│                              │      │ + one additional failure during   │
+│                              │      │ re-replication                    │
+├──────────────────────────────┼──────┼───────────────────────────────────┤
+│ Hot data (read by many jobs) │ 4-5  │ More replicas = more nodes can    │
+│                              │      │ serve reads = better parallelism  │
+├──────────────────────────────┼──────┼───────────────────────────────────┤
+│ Cold archive data            │ 2    │ Rarely accessed, save disk space  │
+│                              │      │ Accept slightly higher risk       │
+└──────────────────────────────┴──────┴───────────────────────────────────┘</code></pre></div>
+<hr>
+<h2>🚫 WHEN NOT TO USE</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>HDFS IS THE WRONG STORAGE WHEN:
+</span>
+1. YOU NEED RANDOM READ/WRITE ACCESS
+   → HDFS is optimized for SEQUENTIAL reads of large files
+   → Reading bytes 5000-6000 from a 10GB file is inefficient
+   → HDFS must find the right block, seek to the offset
+   → Use HBase (Project 27) or a traditional database instead
+
+2. YOU NEED LOW-LATENCY ACCESS
+   → HDFS read involves: Client → NameNode (get block locations) → DataNode
+   → Minimum latency: several milliseconds
+   → For sub-millisecond access: use Redis, Memcached
+
+3. YOU HAVE MANY SMALL FILES
+   → Explained above in "What Should Not Do"
+   → Solutions: HAR files, SequenceFiles (covered in Project 30)
+
+4. YOU NEED POSIX-COMPLIANT FILESYSTEM
+   → HDFS does NOT support:
+     → File append efficiently (append is supported but slow)
+     → Random writes (cannot modify byte 5000 of a file)
+     → Hard links or symbolic links
+     → File locking for concurrent writers
+   → Need these? Use a regular filesystem (ext4, XFS)
+
+5. YOUR DATA CHANGES FREQUENTLY
+   → HDFS is WRITE-ONCE, READ-MANY
+   → Updating one record means rewriting the entire file
+   → Use a database or HBase for mutable data</code></pre></div>
+<hr>
+<h2>⚙️ HOW IT ONLY WORKS — INTERNAL MECHANICS</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>MECHANIC 1: THE COMPLETE FILE WRITE JOURNEY
+</span>
+When you run: hdfs dfs -put call_records.csv /user/telecom/
+
+┌──────────────────────────────────────────────────────────────────────┐
+│ STEP-BY-STEP INTERNAL FLOW                                          │
+│                                                                      │
+│ ① Client calls NameNode.create("/user/telecom/call_records.csv")    │
+│    → NameNode checks:                                                │
+│      → Does parent directory exist? YES → continue                   │
+│      → Does file already exist? NO → continue                        │
+│      → Does client have write permission? YES → continue             │
+│    → NameNode creates file entry in namespace (edits log)            │
+│    → Returns SUCCESS to client (no DataNodes involved yet!)          │
+│                                                                      │
+│ ② Client starts writing data                                        │
+│    → Client's DFSOutputStream splits data into PACKETS (64KB each)  │
+│    → Packets accumulate into a BLOCK (128MB worth)                   │
+│                                                                      │
+│ ③ For each block, client asks NameNode for DataNode list             │
+│    Client: "Where should I write block blk_001?"                     │
+│    NameNode: "Write to [DN1, DN3, DN5]" (rack-aware selection)       │
+│                                                                      │
+│ ④ Client creates replication pipeline                                │
+│    Client → DN1 → DN3 → DN5                                         │
+│                                                                      │
+│ ⑤ Packets flow through pipeline                                     │
+│    ┌────────┐  pkt1  ┌─────┐  pkt1  ┌─────┐  pkt1  ┌─────┐        │
+│    │ Client │──────→ │ DN1 │──────→ │ DN3 │──────→ │ DN5 │         │
+│    └────────┘        └─────┘        └─────┘        └─────┘         │
+│         ↑               │               │               │           │
+│         └───── ACK ─────┴──── ACK ──────┴──── ACK ──────┘           │
+│                                                                      │
+│    → Client maintains TWO queues:                                    │
+│      → DATA QUEUE: packets waiting to be sent                        │
+│      → ACK QUEUE: packets sent but not yet acknowledged              │
+│    → When ACK received: packet removed from ACK queue                │
+│    → If pipeline fails: unACKed packets moved back to data queue     │
+│      → Failed DataNode removed from pipeline                         │
+│      → Pipeline rebuilt with remaining DataNodes                     │
+│      → NameNode schedules re-replication to replace failed node      │
+│                                                                      │
+│ ⑥ After 128MB of packets → block complete                           │
+│    → Client tells NameNode "blk_001 finalized on DN1, DN3, DN5"     │
+│    → Process repeats for blk_002, blk_003, ..., blk_080             │
+│                                                                      │
+│ ⑦ All blocks written → Client calls NameNode.complete()             │
+│    → NameNode verifies minimum replication met for all blocks        │
+│    → File marked as COMPLETE in namespace                            │
+│    → File is now visible to other clients                            │
+└──────────────────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════
+
+MECHANIC 2: THE COMPLETE FILE READ JOURNEY
+
+When you run: hdfs dfs -cat /user/telecom/call_records.csv
+
+┌──────────────────────────────────────────────────────────────────────┐
+│                                                                      │
+│ ① Client calls NameNode.getBlockLocations(file, offset=0, len=ALL) │
+│    → NameNode returns ordered list:                                  │
+│      blk_001: [DN1:50010, DN3:50010, DN5:50010]                     │
+│      blk_002: [DN2:50010, DN4:50010, DN1:50010]                     │
+│      ...                                                             │
+│    → DataNodes SORTED by proximity to client:                        │
+│      → Same node &gt; Same rack &gt; Different rack                        │
+│                                                                      │
+│ ② Client connects DIRECTLY to closest DataNode for blk_001          │
+│    → NO data flows through NameNode (NameNode is metadata only!)     │
+│    → Client reads from DN1 (closest)                                 │
+│                                                                      │
+│ ③ DataNode streams block data to client                              │
+│    → Every 512 bytes: DataNode verifies CRC32 checksum              │
+│    → If checksum fails:                                              │
+│      → DataNode reports corruption to NameNode                       │
+│      → Client automatically retries with next replica (DN3)          │
+│      → NameNode schedules re-replication of corrupted block          │
+│                                                                      │
+│ ④ Block complete → Client moves to blk_002                          │
+│    → Connects to closest DataNode holding blk_002                    │
+│    → Process repeats until all 80 blocks read                        │
+│                                                                      │
+│ ⑤ Client reassembles blocks into original file stream               │
+│    → Blocks read in ORDER (blk_001 then blk_002 then ...)           │
+│    → Client presents a seamless byte stream to the application       │
+│    → Application never knows the file was split into blocks          │
+└──────────────────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════
+
+MECHANIC 3: HEARTBEAT AND BLOCK REPORT SYSTEM
+
+┌──────────────────────────────────────────────────────────────────────┐
+│                                                                      │
+│ HEARTBEAT (every 3 seconds):                                        │
+│   DataNode → NameNode: "I am alive"                                 │
+│   NameNode → DataNode: "OK" + optional COMMANDS:                    │
+│     → "Replicate blk_005 to DN7"                                    │
+│     → "Delete blk_012 (no longer needed)"                           │
+│     → "Shut down (decommissioning)"                                 │
+│                                                                      │
+│ BLOCK REPORT (every 6 hours by default):                            │
+│   DataNode → NameNode: "Here is my complete block list"             │
+│     → [blk_001, blk_005, blk_009, blk_013, ...]                    │
+│   NameNode uses this to:                                             │
+│     → Detect missing replicas (trigger re-replication)               │
+│     → Detect extra replicas (trigger deletion)                       │
+│     → Rebuild block-to-DataNode mapping after restart                │
+│                                                                      │
+│ DEAD NODE DETECTION:                                                 │
+│   → No heartbeat for 10 minutes + 30 seconds (default)              │
+│     = dfs.namenode.heartbeat.recheck-interval (5 min) × 2           │
+│       + 10 × heartbeat interval (3s × 10 = 30s)                     │
+│   → NameNode marks DataNode as DEAD                                  │
+│   → All blocks on dead node: under-replicated                        │
+│   → NameNode commands other DataNodes to re-replicate                │
+│                                                                      │
+│ SELF-HEALING EXAMPLE:                                                │
+│                                                                      │
+│   Before failure:                                                    │
+│     blk_001: DN1 ✓, DN3 ✓, DN5 ✓  (3 replicas — healthy)          │
+│                                                                      │
+│   DN5 crashes:                                                       │
+│     blk_001: DN1 ✓, DN3 ✓, DN5 ✗  (2 replicas — under-replicated) │
+│                                                                      │
+│   NameNode detects after 10.5 minutes:                               │
+│     → Finds blk_001 is under-replicated                              │
+│     → Selects DN2 as new target (rack-aware)                         │
+│     → Commands DN1: "Send blk_001 to DN2"                            │
+│                                                                      │
+│   After re-replication:                                               │
+│     blk_001: DN1 ✓, DN3 ✓, DN2 ✓  (3 replicas — healthy again)    │
+│                                                                      │
+│   ALL AUTOMATIC — NO HUMAN INTERVENTION                              │
+└──────────────────────────────────────────────────────────────────────┘</code></pre></div>
+<hr>
+<h2>⚠️ COMMON PITFALLS AND FAILURE MODES</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>PITFALL 1: "I uploaded a 500MB file but HDFS shows it using 1.5GB"
+</span>→ REASON: Replication factor = 3
+→ 500MB × 3 replicas = 1.5GB physical disk usage
+→ NOT a bug — this is the COST of fault tolerance
+→ hdfs dfs -du -s -h /path shows LOGICAL size
+→ hdfs dfs -du -s -h /path × replication = PHYSICAL size
+
+PITFALL 2: "File upload succeeded but fsck shows CORRUPT blocks"
+→ POSSIBLE CAUSES:
+  → Network corruption during pipeline transfer
+  → Disk bit rot on DataNode
+  → Abrupt DataNode shutdown during write
+→ SOLUTION: HDFS automatically detects via checksums
+  → Re-replicate from healthy copy
+  → If ALL replicas corrupt → data loss (extremely rare with rep=3)
+
+PITFALL 3: "NameNode takes 30 minutes to start"
+→ REASON: Loading fsimage + replaying edits log
+→ If edits log has millions of entries → slow replay
+→ SOLUTION: Ensure SecondaryNameNode is running and checkpointing
+→ Check: ls $HADOOP_HOME/data/namenode/current/
+  → If edits_* files are huge → checkpointing is broken
+
+PITFALL 4: "Cannot write files — SafeMode"
+→ After NameNode starts, it enters SAFE MODE
+→ In SafeMode: reads allowed, writes BLOCKED
+→ NameNode waits for DataNodes to report their blocks
+→ Exits SafeMode when 99.9% of blocks have minimum replicas reported
+→ If DataNodes are slow to start → SafeMode persists
+→ NEVER force-leave SafeMode in production:
+  hdfs dfsadmin -safemode leave  ← DANGEROUS if blocks truly missing
+→ Wait for DataNodes to report, or investigate why they haven't
+
+PITFALL 5: "Deleted a file but disk space didn't free up"
+→ REASON: HDFS Trash is enabled by default
+→ Deleted files go to /user/&lt;username&gt;/.Trash/
+→ Actual deletion happens after trash interval (default: disabled in some configs)
+→ To bypass trash: hdfs dfs -rm -skipTrash /path/to/file
+→ To empty trash: hdfs dfs -expunge
+
+PITFALL 6: "Block not found but file exists"
+→ REASON: NameNode metadata says block exists but no DataNode has it
+→ This means ALL replicas of that block are lost
+→ File is CORRUPT — that portion of data is unrecoverable
+→ Prevention: maintain replication factor ≥ 3, monitor under-replicated blocks</code></pre></div>
+<hr>
+<h2>📈 SCALABILITY CONSIDERATIONS</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>NAMENODE MEMORY — THE SCALING CEILING:
+</span>
+┌──────────────────────┬─────────────┬───────────────────────────┐
+│ Cluster Data Size    │ Approx Files│ NameNode Heap Needed      │
+│ (with rep=3)         │ + Blocks    │                           │
+├──────────────────────┼─────────────┼───────────────────────────┤
+│ 1 TB                 │ ~24K blocks │ ~4 MB (trivial)           │
+├──────────────────────┼─────────────┼───────────────────────────┤
+│ 100 TB               │ ~2.4M blocks│ ~360 MB                   │
+├──────────────────────┼─────────────┼───────────────────────────┤
+│ 1 PB                 │ ~24M blocks │ ~3.6 GB                   │
+├──────────────────────┼─────────────┼───────────────────────────┤
+│ 10 PB                │ ~240M blocks│ ~36 GB                    │
+├──────────────────────┼─────────────┼───────────────────────────┤
+│ 100 PB               │ ~2.4B blocks│ ~360 GB ← PROBLEM!       │
+│                      │             │ (single JVM cannot handle)│
+└──────────────────────┴─────────────┴───────────────────────────┘
+
+→ At ~100PB with default block size, NameNode hits JVM limits
+→ SOLUTION: HDFS Federation (multiple NameNodes) — Project 43
+→ SOLUTION: Increase block size to 256MB+ to halve block count
+
+DATANODE SCALING:
+→ Each DataNode can handle thousands of blocks
+→ Disk I/O is the bottleneck, not block count
+→ Typical DataNode: 12-24 disks × 4-16TB each = 48-384TB per node
+→ Adding DataNodes = linear storage growth
+→ HDFS automatically balances blocks across new nodes
+  → hdfs balancer — redistributes blocks for even disk usage
+
+NETWORK SCALING:
+→ Write bandwidth: limited by pipeline (sequential through 3 nodes)
+→ Read bandwidth: scales with replicas (3 replicas = 3 possible readers)
+→ Inter-rack bandwidth: often 10× less than intra-rack
+→ Rack-aware replication minimizes cross-rack traffic</code></pre></div>
+<hr>
+<h2>🔍 INTERPRETABILITY CONSIDERATIONS</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>HOW TO "SEE" WHAT HDFS IS DOING:
+</span>
+1. FILE SYSTEM CHECK (fsck) — Your primary diagnostic tool
+
+   hdfs fsck / -files -blocks -locations
+   
+   OUTPUT TELLS YOU:
+   → Total files and directories
+   → Total blocks and their sizes
+   → Replication factor per file
+   → Under-replicated blocks (DANGER!)
+   → Corrupt blocks (CRITICAL!)
+   → Missing replicas
+   → DataNode locations for each block
+
+2. ADMIN REPORT — Cluster health at a glance
+
+   hdfs dfsadmin -report
+   
+   OUTPUT TELLS YOU:
+   → Total configured capacity
+   → Used / remaining space
+   → Live DataNodes with individual disk usage
+   → Dead DataNodes (if any)
+   → Under-replicated block count
+
+3. NAMENODE WEB UI — http://namenode:9870
+   
+   → Overview tab: capacity pie chart, live/dead nodes
+   → Datanodes tab: individual node health
+   → Utilities &gt; Browse: navigate HDFS like a file browser
+   → Utilities &gt; Logs: NameNode daemon logs
+
+4. BLOCK LOCATION FOR SPECIFIC FILE:
+
+   hdfs fsck /user/telecom/call_records.csv -files -blocks -locations
+   
+   SAMPLE OUTPUT:
+   /user/telecom/call_records.csv 10737418240 bytes, 80 block(s):
+   OK
+   0. BP-123:blk_001 len=134217728 [DN1:50010, DN3:50010, DN5:50010]
+   1. BP-123:blk_002 len=134217728 [DN2:50010, DN4:50010, DN1:50010]
+   ...
+   79. BP-123:blk_080 len=16777216 [DN4:50010, DN1:50010, DN3:50010]
+   
+   Status: HEALTHY
+   Total blocks: 80 (avg block size: 134217728)
+   Minimally replicated blocks: 80 (100.0%)</code></pre></div>
+<hr>
+<h2>💻 COMPLETE WORKING CODE</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># PROJECT 2: HDFS BLOCK MECHANICS — STORING A LARGE FILE</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># PREREQUISITE: Project 1 setup complete (Hadoop running in pseudo-distributed mode)</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── PART A: GENERATE A LARGE FILE TO DEMONSTRATE BLOCK SPLITTING ──</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># We'll create a ~500MB file (manageable for local testing)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># In production, the same mechanics apply to 10GB, 100GB, 10TB files</span><span>
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"=== GENERATING 500MB TEST FILE ==="</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Create a directory for our project</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">mkdir</span><span> -p /tmp/project2
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Generate a 500MB CSV file simulating telecom call records</span><span>
+</span><span>python3 </span><span class="token" style="color: rgb(57, 58, 52);">&lt;&lt;</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">'PYTHON_SCRIPT'
+</span><span class="token" style="color: rgb(163, 21, 21);">import random
+</span><span class="token" style="color: rgb(163, 21, 21);">import time
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">output_file = "/tmp/project2/call_records.csv"
+</span><span class="token" style="color: rgb(163, 21, 21);">target_size_mb = 500
+</span><span class="token" style="color: rgb(163, 21, 21);">target_size_bytes = target_size_mb * 1024 * 1024
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);"># CSV header
+</span><span class="token" style="color: rgb(163, 21, 21);">header = "caller_id,receiver_id,duration_sec,timestamp,cell_tower_id\n"
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">print(f"Generating {target_size_mb}MB call records file...")
+</span><span class="token" style="color: rgb(163, 21, 21);">start = time.time()
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">bytes_written = 0
+</span><span class="token" style="color: rgb(163, 21, 21);">record_count = 0
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">with open(output_file, 'w') as f:
+</span><span class="token" style="color: rgb(163, 21, 21);">    f.write(header)
+</span><span class="token" style="color: rgb(163, 21, 21);">    bytes_written += len(header)
+</span><span class="token" style="color: rgb(163, 21, 21);">    
+</span><span class="token" style="color: rgb(163, 21, 21);">    while bytes_written &lt; target_size_bytes:
+</span><span class="token" style="color: rgb(163, 21, 21);">        caller = f"+1{random.randint(2000000000, 9999999999)}"
+</span><span class="token" style="color: rgb(163, 21, 21);">        receiver = f"+1{random.randint(2000000000, 9999999999)}"
+</span><span class="token" style="color: rgb(163, 21, 21);">        duration = random.randint(1, 3600)
+</span><span class="token" style="color: rgb(163, 21, 21);">        timestamp = f"2024-01-{random.randint(1,31):02d}T{random.randint(0,23):02d}:{random.randint(0,59):02d}:{random.randint(0,59):02d}"
+</span><span class="token" style="color: rgb(163, 21, 21);">        tower = f"TOWER_{random.randint(1, 500):04d}"
+</span><span class="token" style="color: rgb(163, 21, 21);">        
+</span><span class="token" style="color: rgb(163, 21, 21);">        line = f"{caller},{receiver},{duration},{timestamp},{tower}\n"
+</span><span class="token" style="color: rgb(163, 21, 21);">        f.write(line)
+</span><span class="token" style="color: rgb(163, 21, 21);">        bytes_written += len(line)
+</span><span class="token" style="color: rgb(163, 21, 21);">        record_count += 1
+</span><span class="token" style="color: rgb(163, 21, 21);">        
+</span><span class="token" style="color: rgb(163, 21, 21);">        if record_count % 1000000 == 0:
+</span><span class="token" style="color: rgb(163, 21, 21);">            print(f"  Written {record_count:,} records ({bytes_written/(1024*1024):.0f}MB)")
+</span><span class="token" style="color: rgb(163, 21, 21);">
+</span><span class="token" style="color: rgb(163, 21, 21);">elapsed = time.time() - start
+</span><span class="token" style="color: rgb(163, 21, 21);">print(f"Done: {record_count:,} records, {bytes_written/(1024*1024):.1f}MB in {elapsed:.1f}s")
+</span><span class="token" style="color: rgb(163, 21, 21);">PYTHON_SCRIPT</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Verify the file</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">ls</span><span> -lh /tmp/project2/call_records.csv
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">wc</span><span> -l /tmp/project2/call_records.csv</span></code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── PART B: UPLOAD TO HDFS AND OBSERVE BLOCK SPLITTING ──</span><span>
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"=== UPLOADING TO HDFS ==="</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Create HDFS directory structure</span><span>
+</span>hdfs dfs -mkdir -p /user/telecom/raw/
+
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Upload the file — THIS IS WHERE BLOCK SPLITTING HAPPENS</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># The -put command triggers the entire write pipeline described above</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">time</span><span> hdfs dfs -put /tmp/project2/call_records.csv /user/telecom/raw/
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Verify upload</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"=== FILE IN HDFS ==="</span><span>
+</span>hdfs dfs -ls -h /user/telecom/raw/
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Shows: file size, replication factor, owner, path</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Check detailed file stats</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"=== FILE STATISTICS ==="</span><span>
+</span><span>hdfs dfs -stat </span><span class="token" style="color: rgb(163, 21, 21);">"Name:%n  Size:%b bytes  Replication:%r  BlockSize:%o"</span><span> /user/telecom/raw/call_records.csv
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># %b = file size in bytes</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># %r = replication factor (should be 1 in pseudo-distributed)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># %o = block size (should be 134217728 = 128MB)</span></code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── PART C: INSPECT BLOCK DETAILS — THE CORE OF THIS PROJECT ──</span><span>
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"=== BLOCK-LEVEL INSPECTION ==="</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># THIS IS THE MOST IMPORTANT COMMAND IN THIS PROJECT</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># It shows exactly how HDFS split our file into blocks</span><span>
+</span><span>hdfs </span><span class="token" style="color: rgb(57, 58, 52);">fsck</span><span> /user/telecom/raw/call_records.csv -files -blocks -locations
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># EXPECTED OUTPUT (for a ~500MB file with 128MB blocks):</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># /user/telecom/raw/call_records.csv 524288000 bytes, 4 block(s):</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#   OK</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#   0. BP-xxx:blk_1073741825_1001 len=134217728 [127.0.0.1:9866]</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#   1. BP-xxx:blk_1073741826_1002 len=134217728 [127.0.0.1:9866]</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#   2. BP-xxx:blk_1073741827_1003 len=134217728 [127.0.0.1:9866]</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#   3. BP-xxx:blk_1073741828_1004 len=121634816 [127.0.0.1:9866]</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;">#</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># OBSERVATIONS:</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># → 500MB / 128MB = ~4 blocks (3 full + 1 partial)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># → Block 0-2: exactly 134217728 bytes (128MB)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># → Block 3: remaining bytes (less than 128MB)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># → All on same DataNode (because pseudo-distributed = 1 node)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># → In a real cluster: blocks would be on DIFFERENT DataNodes</span><span>
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"=== HDFS CLUSTER REPORT ==="</span><span>
+</span>hdfs dfsadmin -report
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Shows:</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># → Configured Capacity</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># → DFS Used (should have increased by ~500MB × replication factor)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># → DFS Remaining</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># → Live datanodes (1 in pseudo-distributed)</span></code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── PART D: FIND BLOCKS ON LOCAL FILESYSTEM ──</span><span>
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"=== FINDING ACTUAL BLOCK FILES ON DISK ==="</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># DataNode stores blocks as regular files</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Let's find them</span><span>
+</span><span></span><span class="token assign-left" style="color: rgb(54, 172, 170);">DATANODE_DIR</span><span class="token" style="color: rgb(57, 58, 52);">=</span><span class="token" style="color: rgb(163, 21, 21);">"/opt/hadoop/data/datanode"</span><span>
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"DataNode storage directory:"</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">find</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">$DATANODE_DIR</span><span> -name </span><span class="token" style="color: rgb(163, 21, 21);">"blk_*"</span><span> -not -name </span><span class="token" style="color: rgb(163, 21, 21);">"*.meta"</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">|</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">head</span><span> -20
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"Block files with sizes:"</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">find</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">$DATANODE_DIR</span><span> -name </span><span class="token" style="color: rgb(163, 21, 21);">"blk_*"</span><span> -not -name </span><span class="token" style="color: rgb(163, 21, 21);">"*.meta"</span><span> -exec </span><span class="token" style="color: rgb(57, 58, 52);">ls</span><span> -lh </span><span class="token" style="color: rgb(57, 58, 52);">{</span><span class="token" style="color: rgb(57, 58, 52);">}</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">\</span><span class="token" style="color: rgb(57, 58, 52);">;</span><span>
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"Checksum (meta) files:"</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">find</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">$DATANODE_DIR</span><span> -name </span><span class="token" style="color: rgb(163, 21, 21);">"*.meta"</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">|</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">head</span><span> -10
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># VERIFY: Read first few lines directly from a block file</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"=== READING RAW BLOCK CONTENT (first 3 lines) ==="</span><span>
+</span><span></span><span class="token assign-left" style="color: rgb(54, 172, 170);">FIRST_BLOCK</span><span class="token" style="color: rgb(57, 58, 52);">=</span><span class="token" style="color: rgb(54, 172, 170);">$(</span><span class="token" style="color: rgb(57, 58, 52);">find</span><span class="token" style="color: rgb(54, 172, 170);"> $DATANODE_DIR -name </span><span class="token" style="color: rgb(163, 21, 21);">"blk_*"</span><span class="token" style="color: rgb(54, 172, 170);"> -not -name </span><span class="token" style="color: rgb(163, 21, 21);">"*.meta"</span><span class="token" style="color: rgb(54, 172, 170);"> </span><span class="token" style="color: rgb(57, 58, 52);">|</span><span class="token" style="color: rgb(54, 172, 170);"> </span><span class="token" style="color: rgb(57, 58, 52);">sort</span><span class="token" style="color: rgb(54, 172, 170);"> </span><span class="token" style="color: rgb(57, 58, 52);">|</span><span class="token" style="color: rgb(54, 172, 170);"> </span><span class="token" style="color: rgb(57, 58, 52);">head</span><span class="token" style="color: rgb(54, 172, 170);"> -1</span><span class="token" style="color: rgb(54, 172, 170);">)</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"Block file: </span><span class="token" style="color: rgb(54, 172, 170);">$FIRST_BLOCK</span><span class="token" style="color: rgb(163, 21, 21);">"</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"Block size: </span><span class="token" style="color: rgb(54, 172, 170);">$(</span><span class="token" style="color: rgb(57, 58, 52);">ls</span><span class="token" style="color: rgb(54, 172, 170);"> -lh $FIRST_BLOCK </span><span class="token" style="color: rgb(57, 58, 52);">|</span><span class="token" style="color: rgb(54, 172, 170);"> </span><span class="token" style="color: rgb(57, 58, 52);">awk</span><span class="token" style="color: rgb(54, 172, 170);"> </span><span class="token" style="color: rgb(54, 172, 170);">'{print $5}'</span><span class="token" style="color: rgb(54, 172, 170);">)</span><span class="token" style="color: rgb(163, 21, 21);">"</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"First 3 lines of raw block:"</span><span>
+</span><span></span><span class="token" style="color: rgb(57, 58, 52);">head</span><span> -3 </span><span class="token" style="color: rgb(54, 172, 170);">$FIRST_BLOCK</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># THIS PROVES:</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># → Blocks are just chunks of the original file</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># → Block 1 starts from byte 0 (includes CSV header)</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># → Each block is a regular file on the DataNode's local filesystem</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># → The .meta file next to it contains CRC32 checksums</span></code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── PART E: EXPERIMENT WITH DIFFERENT BLOCK SIZES ──</span><span>
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"=== UPLOADING WITH CUSTOM BLOCK SIZE ==="</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Upload same file with 64MB block size</span><span>
+</span><span>hdfs dfs -D dfs.blocksize</span><span class="token" style="color: rgb(57, 58, 52);">=</span><span class="token" style="color: rgb(54, 172, 170);">67108864</span><span> -put /tmp/project2/call_records.csv /user/telecom/raw/call_records_64mb_blocks.csv
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"=== COMPARING BLOCK COUNTS ==="</span><span>
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"--- Default 128MB blocks ---"</span><span>
+</span><span>hdfs </span><span class="token" style="color: rgb(57, 58, 52);">fsck</span><span> /user/telecom/raw/call_records.csv -files -blocks </span><span class="token file-descriptor" style="color: rgb(238, 153, 0); font-weight: bold;">2</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>/dev/null </span><span class="token" style="color: rgb(57, 58, 52);">|</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">grep</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"block(s)"</span><span>
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"--- Custom 64MB blocks ---"</span><span>
+</span><span>hdfs </span><span class="token" style="color: rgb(57, 58, 52);">fsck</span><span> /user/telecom/raw/call_records_64mb_blocks.csv -files -blocks </span><span class="token file-descriptor" style="color: rgb(238, 153, 0); font-weight: bold;">2</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>/dev/null </span><span class="token" style="color: rgb(57, 58, 52);">|</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">grep</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"block(s)"</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># EXPECTED:</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># 128MB blocks: ~4 blocks for 500MB file</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># 64MB blocks:  ~8 blocks for 500MB file</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># SAME DATA, DIFFERENT BLOCK STRATEGIES</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Upload with 256MB block size</span><span>
+</span><span>hdfs dfs -D dfs.blocksize</span><span class="token" style="color: rgb(57, 58, 52);">=</span><span class="token" style="color: rgb(54, 172, 170);">268435456</span><span> -put /tmp/project2/call_records.csv /user/telecom/raw/call_records_256mb_blocks.csv
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"--- Custom 256MB blocks ---"</span><span>
+</span><span>hdfs </span><span class="token" style="color: rgb(57, 58, 52);">fsck</span><span> /user/telecom/raw/call_records_256mb_blocks.csv -files -blocks </span><span class="token file-descriptor" style="color: rgb(238, 153, 0); font-weight: bold;">2</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>/dev/null </span><span class="token" style="color: rgb(57, 58, 52);">|</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">grep</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"block(s)"</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># EXPECTED: ~2 blocks for 500MB file</span><span>
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"=== IMPACT SUMMARY ==="</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"File size: 500MB"</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"64MB blocks  → ~8 blocks → More parallelism, more NameNode memory"</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"128MB blocks → ~4 blocks → Balanced (default)"</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"256MB blocks → ~2 blocks → Less parallelism, less NameNode memory"</span></code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── PART F: REPLICATION EXPERIMENTS ──</span><span>
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"=== REPLICATION FACTOR EXPERIMENTS ==="</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Check current replication of our file</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"Current replication:"</span><span>
+</span><span>hdfs dfs -stat </span><span class="token" style="color: rgb(163, 21, 21);">"%r"</span><span> /user/telecom/raw/call_records.csv
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Expected: 1 (pseudo-distributed default)</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Change replication factor to 2</span><span>
+</span><span>hdfs dfs -setrep </span><span class="token" style="color: rgb(54, 172, 170);">2</span><span> /user/telecom/raw/call_records.csv
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"After setrep 2:"</span><span>
+</span><span>hdfs dfs -stat </span><span class="token" style="color: rgb(163, 21, 21);">"%r"</span><span> /user/telecom/raw/call_records.csv
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Check replication status</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"Replication status:"</span><span>
+</span><span>hdfs </span><span class="token" style="color: rgb(57, 58, 52);">fsck</span><span> /user/telecom/raw/call_records.csv -files -blocks -locations </span><span class="token file-descriptor" style="color: rgb(238, 153, 0); font-weight: bold;">2</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>/dev/null </span><span class="token" style="color: rgb(57, 58, 52);">|</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">tail</span><span> -15
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># NOTE: In pseudo-distributed mode (1 DataNode), setting replication &gt; 1</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># will cause under-replicated blocks because there aren't enough DataNodes</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># to place the extra replicas. This is EXPECTED and demonstrates the concept.</span><span>
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"Under-replicated blocks (expected in pseudo-distributed):"</span><span>
+</span><span>hdfs dfsadmin -report </span><span class="token file-descriptor" style="color: rgb(238, 153, 0); font-weight: bold;">2</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>/dev/null </span><span class="token" style="color: rgb(57, 58, 52);">|</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">grep</span><span> -A2 </span><span class="token" style="color: rgb(163, 21, 21);">"Under replicated"</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Reset to replication 1 for pseudo-distributed</span><span>
+</span><span>hdfs dfs -setrep </span><span class="token" style="color: rgb(54, 172, 170);">1</span><span> /user/telecom/raw/call_records.csv</span></code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── PART G: PYTHON HDFS CLIENT — PROGRAMMATIC BLOCK INSPECTION ──</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># This script connects to HDFS and inspects block details programmatically</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Install: pip install hdfs</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Alternative: pip install pyarrow (has HDFS support)</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Using subprocess to call hdfs commands (works without extra libraries)</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> subprocess
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> json
+</span><span></span><span class="token" style="color: rgb(0, 0, 255);">import</span><span> re
+</span>
+<span></span><span class="token" style="color: rgb(0, 0, 255);">def</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">run_hdfs_command</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>cmd</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>    </span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">"""Execute an HDFS command and return output."""</span><span>
+</span><span>    result </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> subprocess</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>run</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>cmd</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> shell</span><span class="token" style="color: rgb(57, 58, 52);">=</span><span class="token" style="color: rgb(54, 172, 170);">True</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> capture_output</span><span class="token" style="color: rgb(57, 58, 52);">=</span><span class="token" style="color: rgb(54, 172, 170);">True</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> text</span><span class="token" style="color: rgb(57, 58, 52);">=</span><span class="token" style="color: rgb(54, 172, 170);">True</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">return</span><span> result</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>stdout</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> result</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>stderr
+</span>
+<span></span><span class="token" style="color: rgb(0, 0, 255);">def</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">get_file_info</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>hdfs_path</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>    </span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">"""Get detailed file information from HDFS."""</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"\n</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'='</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">70</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"HDFS FILE ANALYSIS: </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">hdfs_path</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'='</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">70</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Basic file stats</span><span>
+</span><span>    stdout</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> _ </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> run_hdfs_command</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f'hdfs dfs -stat "%n|%b|%r|%o|%y" </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">hdfs_path</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">'</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">if</span><span> stdout</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>strip</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>        parts </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> stdout</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>strip</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>split</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">'|'</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>        name </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> parts</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(54, 172, 170);">0</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span>
+</span><span>        size_bytes </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token builtin">int</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>parts</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>        replication </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token builtin">int</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>parts</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(54, 172, 170);">2</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>        block_size </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token builtin">int</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>parts</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(54, 172, 170);">3</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>        mod_time </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> parts</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(54, 172, 170);">4</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span>
+</span>        
+<span>        num_blocks </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>size_bytes </span><span class="token" style="color: rgb(57, 58, 52);">+</span><span> block_size </span><span class="token" style="color: rgb(57, 58, 52);">-</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">//</span><span> block_size  </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ceiling division</span><span>
+</span>        
+<span>        </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"\n  File Name:        </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">name</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"  File Size:        </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">size_bytes</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">,</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> bytes (</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">size_bytes</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">/</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">1024</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">1024</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">)</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">.1f</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> MB)"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"  Replication:      </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">replication</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"  Block Size:       </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">block_size</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">,</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> bytes (</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">block_size</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">/</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">1024</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">1024</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">)</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">.0f</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> MB)"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"  Expected Blocks:  </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">num_blocks</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"  Physical Storage: </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">size_bytes </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation"> replication </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">/</span><span class="token string-interpolation interpolation"> </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">1024</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">1024</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">)</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">.1f</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> MB (with replication)"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"  Last Modified:    </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">mod_time</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>        
+<span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># NameNode memory estimate</span><span>
+</span><span>        nn_memory </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> num_blocks </span><span class="token" style="color: rgb(57, 58, 52);">*</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">150</span><span>  </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ~150 bytes per block entry</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"\n  NameNode Memory Impact:"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"    Block entries:  </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">num_blocks</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> × 150 bytes = </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">nn_memory</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">,</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> bytes"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"    File entry:     ~</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">250</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> bytes (path, permissions, etc.)"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"    Total:          ~</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">nn_memory </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">+</span><span class="token string-interpolation interpolation"> </span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">250</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">,</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> bytes"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Block-level details via fsck</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"\n  </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'─'</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">50</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"  BLOCK-LEVEL DETAILS:"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"  </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'─'</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">50</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    stdout</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> _ </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> run_hdfs_command</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f'hdfs fsck </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">hdfs_path</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> -files -blocks -locations 2&gt;/dev/null'</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    block_pattern </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> re</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span class="token builtin">compile</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">r'(\d+)\.\s+\S+:(blk_\d+).*?len=(\d+)\s+\[(.*?)\]'</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    blocks </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> block_pattern</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>findall</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>stdout</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    total_block_bytes </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">0</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">for</span><span> idx</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> block_id</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> length</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> locations </span><span class="token" style="color: rgb(0, 0, 255);">in</span><span> blocks</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>        length </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token builtin">int</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>length</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>        total_block_bytes </span><span class="token" style="color: rgb(57, 58, 52);">+=</span><span> length
+</span><span>        loc_list </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> locations</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>split</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">', '</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">if</span><span> locations </span><span class="token" style="color: rgb(0, 0, 255);">else</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(163, 21, 21);">'unknown'</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span>
+</span>        
+<span>        </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"\n    Block </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">idx</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">:"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"      ID:        </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">block_id</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"      Size:      </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">length</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">,</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> bytes (</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">length</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">/</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">1024</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">1024</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">)</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">.1f</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> MB)"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"      Locations: </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">loc_list</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>        
+<span>        </span><span class="token" style="color: rgb(0, 0, 255);">if</span><span> length </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span> block_size</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>            </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"      Note:      PARTIAL BLOCK (last block of file)"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    </span><span class="token" style="color: rgb(0, 0, 255);">if</span><span> blocks</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"\n  </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'─'</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">50</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"  SUMMARY:"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"    Total blocks found: </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation builtin">len</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation interpolation">blocks</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">)</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"    Full blocks:        </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation builtin">len</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">[</span><span class="token string-interpolation interpolation">b </span><span class="token string-interpolation interpolation" style="color: rgb(0, 0, 255);">for</span><span class="token string-interpolation interpolation"> b </span><span class="token string-interpolation interpolation" style="color: rgb(0, 0, 255);">in</span><span class="token string-interpolation interpolation"> blocks </span><span class="token string-interpolation interpolation" style="color: rgb(0, 0, 255);">if</span><span class="token string-interpolation interpolation"> </span><span class="token string-interpolation interpolation builtin">int</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation interpolation">b</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">[</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">2</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">]</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">)</span><span class="token string-interpolation interpolation"> </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">==</span><span class="token string-interpolation interpolation"> block_size</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">]</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">)</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"    Partial blocks:     </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation builtin">len</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">[</span><span class="token string-interpolation interpolation">b </span><span class="token string-interpolation interpolation" style="color: rgb(0, 0, 255);">for</span><span class="token string-interpolation interpolation"> b </span><span class="token string-interpolation interpolation" style="color: rgb(0, 0, 255);">in</span><span class="token string-interpolation interpolation"> blocks </span><span class="token string-interpolation interpolation" style="color: rgb(0, 0, 255);">if</span><span class="token string-interpolation interpolation"> </span><span class="token string-interpolation interpolation builtin">int</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation interpolation">b</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">[</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">2</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">]</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">)</span><span class="token string-interpolation interpolation"> </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">&lt;</span><span class="token string-interpolation interpolation"> block_size</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">]</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">)</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"    Total block bytes:  </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">total_block_bytes</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">,</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> (should match file size)"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 0, 255);">def</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">compare_block_strategies</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>hdfs_dir</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>    </span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">"""Compare different block size strategies for files in a directory."""</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"\n</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'='</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">70</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"BLOCK STRATEGY COMPARISON"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'='</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">70</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    stdout</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> _ </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> run_hdfs_command</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f'hdfs dfs -ls </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">hdfs_dir</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">'</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    files </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">for</span><span> line </span><span class="token" style="color: rgb(0, 0, 255);">in</span><span> stdout</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>strip</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>split</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">'\n'</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">if</span><span> line</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>startswith</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">'-'</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>            parts </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> line</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>split</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>            path </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> parts</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(57, 58, 52);">-</span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span>
+</span><span>            size </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token builtin">int</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>parts</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(54, 172, 170);">4</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>            files</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>append</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>path</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> size</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"\n  </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'File'</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">&lt;55</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'Size'</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">&gt;10</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'Blocks'</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">&gt;8</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"  </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'─'</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">55</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'─'</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">10</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'─'</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">8</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    </span><span class="token" style="color: rgb(0, 0, 255);">for</span><span> path</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> size </span><span class="token" style="color: rgb(0, 0, 255);">in</span><span> files</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>        fsck_out</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> _ </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> run_hdfs_command</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f'hdfs fsck </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">path</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> -files -blocks 2&gt;/dev/null'</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>        block_match </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> re</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>search</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">r'(\d+)\s+block\(s\)'</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> fsck_out</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>        num_blocks </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token builtin">int</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>block_match</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>group</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(0, 0, 255);">if</span><span> block_match </span><span class="token" style="color: rgb(0, 0, 255);">else</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">0</span><span>
+</span>        
+<span>        filename </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> path</span><span class="token" style="color: rgb(57, 58, 52);">.</span><span>split</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">'/'</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">[</span><span class="token" style="color: rgb(57, 58, 52);">-</span><span class="token" style="color: rgb(54, 172, 170);">1</span><span class="token" style="color: rgb(57, 58, 52);">]</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"  </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">filename</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">&lt;55</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">size</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">/</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">1024</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">1024</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">)</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">&gt;8.1f</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">MB </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">num_blocks</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">&gt;6</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 0, 255);">def</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">demonstrate_namenode_scaling</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>    </span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">"""Show how NameNode memory grows with file count."""</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"\n</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'='</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">70</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"NAMENODE MEMORY SCALING DEMONSTRATION"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'='</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">70</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    scenarios </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">[</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"Small startup"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>     </span><span class="token" style="color: rgb(54, 172, 170);">100</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>    </span><span class="token" style="color: rgb(163, 21, 21);">"1 GB"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>     </span><span class="token" style="color: rgb(54, 172, 170);">128</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"Growing company"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>   </span><span class="token" style="color: rgb(54, 172, 170);">10000</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>  </span><span class="token" style="color: rgb(163, 21, 21);">"100 GB"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>   </span><span class="token" style="color: rgb(54, 172, 170);">128</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"Enterprise"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>        </span><span class="token" style="color: rgb(54, 172, 170);">100000</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"10 TB"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>    </span><span class="token" style="color: rgb(54, 172, 170);">128</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"Big Data company"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>  </span><span class="token" style="color: rgb(54, 172, 170);">1000000</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span class="token" style="color: rgb(163, 21, 21);">"1 PB"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>     </span><span class="token" style="color: rgb(54, 172, 170);">128</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"Web giant"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>         </span><span class="token" style="color: rgb(54, 172, 170);">10000000</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span class="token" style="color: rgb(163, 21, 21);">"100 PB"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>  </span><span class="token" style="color: rgb(54, 172, 170);">128</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>        </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"Web giant (256MB)"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">10000000</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span class="token" style="color: rgb(163, 21, 21);">"100 PB"</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>  </span><span class="token" style="color: rgb(54, 172, 170);">256</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span>
+</span><span>    </span><span class="token" style="color: rgb(57, 58, 52);">]</span><span>
+</span>    
+<span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"\n  </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'Scenario'</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">&lt;22</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'Files'</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">&gt;12</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'Data'</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">&gt;8</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'BlkSize'</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">&gt;8</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'~Blocks'</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">&gt;12</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'NN Heap'</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">&gt;10</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"  </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'─'</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">22</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'─'</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">12</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'─'</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">8</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'─'</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">8</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'─'</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">12</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'─'</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">10</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    </span><span class="token" style="color: rgb(0, 0, 255);">for</span><span> name</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> num_files</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> data_size</span><span class="token" style="color: rgb(57, 58, 52);">,</span><span> blk_mb </span><span class="token" style="color: rgb(0, 0, 255);">in</span><span> scenarios</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Estimate: average file has ~5 blocks</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">if</span><span> blk_mb </span><span class="token" style="color: rgb(57, 58, 52);">==</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">256</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>            avg_blocks </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">2.5</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">else</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>            avg_blocks </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">5</span><span>
+</span>        
+<span>        total_blocks </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token builtin">int</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>num_files </span><span class="token" style="color: rgb(57, 58, 52);">*</span><span> avg_blocks</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Each file entry ~250 bytes, each block entry ~150 bytes</span><span>
+</span><span>        nn_bytes </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>num_files </span><span class="token" style="color: rgb(57, 58, 52);">*</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">250</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">+</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">(</span><span>total_blocks </span><span class="token" style="color: rgb(57, 58, 52);">*</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">150</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>        
+<span>        </span><span class="token" style="color: rgb(0, 0, 255);">if</span><span> nn_bytes </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">1024</span><span class="token" style="color: rgb(57, 58, 52);">*</span><span class="token" style="color: rgb(54, 172, 170);">1024</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>            nn_str </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">nn_bytes</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">/</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">1024</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">.0f</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> KB"</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">elif</span><span> nn_bytes </span><span class="token" style="color: rgb(57, 58, 52);">&lt;</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">1024</span><span class="token" style="color: rgb(57, 58, 52);">*</span><span class="token" style="color: rgb(54, 172, 170);">1024</span><span class="token" style="color: rgb(57, 58, 52);">*</span><span class="token" style="color: rgb(54, 172, 170);">1024</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>            nn_str </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">nn_bytes</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">/</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">1024</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">1024</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">)</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">.0f</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> MB"</span><span>
+</span><span>        </span><span class="token" style="color: rgb(0, 0, 255);">else</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>            nn_str </span><span class="token" style="color: rgb(57, 58, 52);">=</span><span> </span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">nn_bytes</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">/</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">1024</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">1024</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">1024</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">)</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">.1f</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> GB"</span><span>
+</span>        
+<span>        </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"  </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">name</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">&lt;22</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">num_files</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">&gt;12,</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">data_size</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">&gt;8</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">blk_mb</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">&gt;6</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">MB </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">total_blocks</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">&gt;12,</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);"> </span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation">nn_str</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">:</span><span class="token string-interpolation interpolation format-spec">&gt;10</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"\n  KEY INSIGHT:"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"  → NameNode memory is proportional to NUMBER of files and blocks"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"  → NOT proportional to DATA size"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"  → 1 file of 1TB uses less NameNode memory than 1 million files of 1KB"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># MAIN EXECUTION</span><span>
+</span><span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ══════════════════════════════════════════════════════════════</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 0, 255);">if</span><span> __name__ </span><span class="token" style="color: rgb(57, 58, 52);">==</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"__main__"</span><span class="token" style="color: rgb(57, 58, 52);">:</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"="</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">*</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">70</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"PROJECT 2: HDFS BLOCK MECHANICS — DEEP INSPECTION"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"="</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">*</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">70</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Analyze the main file</span><span>
+</span><span>    get_file_info</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"/user/telecom/raw/call_records.csv"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Compare different block strategies</span><span>
+</span><span>    compare_block_strategies</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"/user/telecom/raw/"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    </span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Show NameNode scaling implications</span><span>
+</span><span>    demonstrate_namenode_scaling</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span>    
+<span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">f"\n</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">{</span><span class="token string-interpolation interpolation" style="color: rgb(163, 21, 21);">'='</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">*</span><span class="token string-interpolation interpolation" style="color: rgb(54, 172, 170);">70</span><span class="token string-interpolation interpolation" style="color: rgb(57, 58, 52);">}</span><span class="token string-interpolation" style="color: rgb(163, 21, 21);">"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"KEY PROOF:"</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token" style="color: rgb(163, 21, 21);">"="</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">*</span><span> </span><span class="token" style="color: rgb(54, 172, 170);">70</span><span class="token" style="color: rgb(57, 58, 52);">)</span><span>
+</span><span>    </span><span class="token" style="color: rgb(0, 0, 255);">print</span><span class="token" style="color: rgb(57, 58, 52);">(</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">"""
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    We have PROVEN that:
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    1. HDFS splits our 500MB file into ~4 blocks of 128MB each
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    2. The last block is SMALLER (holds remaining bytes)
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    3. Blocks are actual FILES on the DataNode's local filesystem
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    4. Each block has a companion .meta file with checksums
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    5. Different block sizes create different numbers of blocks
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    6. Replication multiplies physical storage usage
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    7. NameNode memory scales with FILE COUNT, not DATA SIZE
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    The 10GB file from our scenario would create:
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    → 10GB / 128MB = 80 blocks
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    → With replication 3: 80 × 3 = 240 block replicas across the cluster
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    → NameNode memory: 80 × 150 bytes = 12KB (trivial!)
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    → But spread across many DataNodes for parallel reading
+</span><span class="token triple-quoted-string" style="color: rgb(163, 21, 21);">    """</span><span class="token" style="color: rgb(57, 58, 52);">)</span></code></pre></div>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># ── PART H: CLEANUP AND VERIFICATION ──</span><span>
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"=== FINAL HDFS STATE ==="</span><span>
+</span>
+<span></span><span class="token" style="color: rgb(0, 128, 0); font-style: italic;"># Show everything we've created</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"Directory listing:"</span><span>
+</span>hdfs dfs -ls -R -h /user/telecom/
+
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"Disk usage summary:"</span><span>
+</span>hdfs dfs -du -s -h /user/telecom/raw/*
+
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"Overall HDFS health:"</span><span>
+</span><span>hdfs </span><span class="token" style="color: rgb(57, 58, 52);">fsck</span><span> / -files -blocks </span><span class="token file-descriptor" style="color: rgb(238, 153, 0); font-weight: bold;">2</span><span class="token" style="color: rgb(57, 58, 52);">&gt;</span><span>/dev/null </span><span class="token" style="color: rgb(57, 58, 52);">|</span><span> </span><span class="token" style="color: rgb(57, 58, 52);">tail</span><span> -20
+</span>
+<span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"=== PROJECT 2 COMPLETE ==="</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"Files in HDFS:"</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"  /user/telecom/raw/call_records.csv              (128MB blocks - default)"</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"  /user/telecom/raw/call_records_64mb_blocks.csv   (64MB blocks)"</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"  /user/telecom/raw/call_records_256mb_blocks.csv  (256MB blocks)"</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">""</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"These files will be used in Project 3 for HDFS CLI operations"</span><span>
+</span><span></span><span class="token builtin" style="color: rgb(43, 145, 175);">echo</span><span> </span><span class="token" style="color: rgb(163, 21, 21);">"and in Project 4 for our first MapReduce job."</span></code></pre></div>
+<hr>
+<h2>🔑 KEY TAKEAWAY</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>WHAT WE ESTABLISHED IN PROJECT 2:
+</span>
+✅ BLOCK MECHANICS:
+   → HDFS splits every file into fixed-size blocks (default 128MB)
+   → Last block can be smaller than block size
+   → Block size is a tradeoff: seek time vs. NameNode memory vs. parallelism
+   → 128MB is the sweet spot for most workloads
+
+✅ NAMENODE INTERNALS:
+   → Stores namespace (directory tree) + block locations IN MEMORY
+   → Persists namespace to disk via fsimage + edits log
+   → SecondaryNameNode merges edits into fsimage (NOT a backup!)
+   → Memory scales with FILE/BLOCK COUNT, not data volume
+
+✅ DATANODE INTERNALS:
+   → Stores blocks as regular files on local filesystem
+   → Companion .meta files contain CRC32 checksums
+   → Sends heartbeat every 3 seconds
+   → Sends full block report every 6 hours
+
+✅ REPLICATION MECHANICS:
+   → Pipeline replication: Client → DN1 → DN2 → DN3
+   → Rack-aware placement for fault tolerance
+   → Self-healing: NameNode detects dead nodes, triggers re-replication
+
+✅ WHAT WE PROVED WITH CODE:
+   → Uploaded a 500MB file, inspected its 4 blocks
+   → Found actual block files on DataNode's local disk
+   → Compared 64MB vs 128MB vs 256MB block strategies
+   → Demonstrated NameNode memory scaling implications
+
+CONNECTING TO PROJECT 1:
+   → Project 1 explained WHY we need distributed storage
+   → Project 2 explained HOW HDFS actually stores data
+   → We can now SEE blocks, MEASURE them, LOCATE them
+
+WHAT WE HAVE NOT COVERED YET:
+   → How to efficiently navigate, manage, and manipulate HDFS files
+   → How to move data between local filesystem and HDFS at scale
+   → The full CLI toolkit that every Hadoop developer uses daily</code></pre></div>
+<hr>
+<h2>🌉 BRIDGE TO PROJECT 3</h2>
+<div class="relative"><pre style="color: rgb(57, 58, 52); font-family: Consolas, &quot;Bitstream Vera Sans Mono&quot;, &quot;Courier New&quot;, Courier, monospace; direction: ltr; text-align: left; white-space: pre; word-spacing: normal; word-break: normal; font-size: 0.9em; line-height: 1.2em; tab-size: 4; hyphens: none; padding: 1em; margin: 0.5em 0px; overflow: auto; border: 1px solid rgb(221, 221, 221); background-color: white;"><code style="white-space: pre-wrap; word-break: break-all;"><span>NOW THAT WE UNDERSTAND HOW HDFS STORES DATA INTERNALLY...
+</span>
+PROJECT 3 asks: "How do we actually NAVIGATE and MANAGE
+this distributed warehouse of blocks?"
+
+We will master:
+→ The complete hdfs dfs command toolkit
+→ -ls, -put, -get, -cat, -tail, -mv, -cp, -rm, -mkdir
+→ File permissions and ownership in HDFS
+→ Disk usage analysis and quota management
+→ Moving data between local filesystem and HDFS efficiently
+→ Wildcards, recursive operations, and bulk transfers
+
+The BLOCKS from this project become FILES we navigate
+in the next one — and the FILES from Project 3 become
+the INPUT for our first MapReduce job in Project 4.</code></pre></div>
+<hr>
+</div>
+</div>
+
+<!-- ========== data-index="7" ========== -->
+
+        </div>
+
+        <div class="nav-bar">
+            <a href="project-1.html" class="nav-button prev">← Previous Project</a>
+            <div class="page-info">
+                <a href="index.html" class="nav-button home">📚 Table of Contents</a><br>
+                <span style="margin-top:8px;display:block">Project 2 of 50</span>
+            </div>
+            <a href="project-3.html" class="nav-button next">Next Project →</a>
+        </div>
+    </div>
+
+    
+    <div id="progress-track"><div id="progress-fill"></div></div>
+    <div id="progress-pct">0%</div>
+
+
+<script src="script.js"></script>
+
+</body>
+</html>
